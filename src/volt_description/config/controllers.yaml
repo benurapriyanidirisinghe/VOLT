@@ -1,0 +1,37 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_group_position_controller:
+      type: position_controllers/JointGroupPositionController
+
+
+joint_group_position_controller:
+  ros__parameters:
+    joints:
+      - front_left_shoulder
+      - front_left_leg
+      - front_left_foot
+
+      - front_right_shoulder
+      - front_right_leg
+      - front_right_foot
+
+      - rear_left_shoulder
+      - rear_left_leg
+      - rear_left_foot
+
+      - rear_right_shoulder
+      - rear_right_leg
+      - rear_right_foot
+
+    interface_name: position
+
+gz_ros2_control:
+  ros__parameters:
+    # Position commands are applied as a first-order joint velocity target.
+    # 0.35 keeps the legs responsive without the oscillation risk of gains > 1.
+    position_proportional_gain: 0.35

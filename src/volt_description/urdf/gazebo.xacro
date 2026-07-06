@@ -1,0 +1,129 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Main body -->
+  <gazebo reference="base_link">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="front_link">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="rear_link">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="lidar_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+  <!-- Front left leg -->
+  <gazebo reference="front_left_shoulder_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="front_left_leg_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="front_left_leg_link_cover">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="front_left_foot_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="front_left_toe_link">
+    <mu1>2.0</mu1>
+    <mu2>2.0</mu2>
+    <kp>100000.0</kp>
+    <kd>20.0</kd>
+    <minDepth>0.002</minDepth>
+    <maxVel>0.02</maxVel>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <!-- Front right leg -->
+  <gazebo reference="front_right_shoulder_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="front_right_leg_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="front_right_leg_link_cover">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="front_right_foot_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="front_right_toe_link">
+    <mu1>2.0</mu1>
+    <mu2>2.0</mu2>
+    <kp>100000.0</kp>
+    <kd>20.0</kd>
+    <minDepth>0.002</minDepth>
+    <maxVel>0.02</maxVel>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <!-- Rear left leg -->
+  <gazebo reference="rear_left_shoulder_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="rear_left_leg_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="rear_left_leg_link_cover">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="rear_left_foot_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="rear_left_toe_link">
+    <mu1>2.0</mu1>
+    <mu2>2.0</mu2>
+    <kp>100000.0</kp>
+    <kd>20.0</kd>
+    <minDepth>0.002</minDepth>
+    <maxVel>0.02</maxVel>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <!-- Rear right leg -->
+  <gazebo reference="rear_right_shoulder_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <gazebo reference="rear_right_leg_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="rear_right_leg_link_cover">
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <gazebo reference="rear_right_foot_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <gazebo reference="rear_right_toe_link">
+    <mu1>2.0</mu1>
+    <mu2>2.0</mu2>
+    <kp>100000.0</kp>
+    <kd>20.0</kd>
+    <minDepth>0.002</minDepth>
+    <maxVel>0.02</maxVel>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+</robot>
