@@ -37,7 +37,8 @@ class VoltMotionController(Node):
         self.declare_parameter("debug_gait", False)
         self.declare_parameter("max_joint_velocity", 4.0)
         self.declare_parameter("max_joint_acceleration", 18.0)
-        self.declare_parameter("joint_smoothing_factor", 0.90)
+        self.declare_parameter("joint_smoothing_factor", 0.12)
+        self.declare_parameter("smoothing_alpha", 0.12)
 
         self.control_rate = float(self.get_parameter("control_rate").value)
         self.command_timeout = float(self.get_parameter("command_timeout").value)
@@ -52,8 +53,8 @@ class VoltMotionController(Node):
             self.get_parameter("max_joint_acceleration").value
         )
         self.joint_smoothing_factor = clamp(
-            float(self.get_parameter("joint_smoothing_factor").value),
-            0.05,
+            float(self.get_parameter("smoothing_alpha").value),
+            0.02,
             1.0,
         )
 
@@ -292,20 +293,32 @@ class VoltMotionController(Node):
         )
 
     def gait_target(self, now, dt):
-        feet, support_shift, active = self.gait_controller.step(
+        feet, body_adjustment, active = self.gait_controller.step(
             now,
             dt,
             tuple(self.filtered_velocity),
             self.step_in_place,
         )
         self.motion_active = active
+        if isinstance(body_adjustment, dict):
+            body_x = self.body_x
+            body_y = self.body_y
+            body_height = self.body_height + body_adjustment.get("height", 0.0)
+            body_roll = self.body_roll + body_adjustment.get("roll", 0.0)
+            body_pitch = self.body_pitch + body_adjustment.get("pitch", 0.0)
+        else:
+            body_x = self.body_x + body_adjustment[0]
+            body_y = self.body_y + body_adjustment[1]
+            body_height = self.body_height
+            body_roll = self.body_roll
+            body_pitch = self.body_pitch
         joints = feet_to_joint_positions(
             feet,
-            height=self.body_height,
-            body_x=self.body_x + support_shift[0],
-            body_y=self.body_y + support_shift[1],
-            roll=self.body_roll,
-            pitch=self.body_pitch,
+            height=body_height,
+            body_x=body_x,
+            body_y=body_y,
+            roll=body_roll,
+            pitch=body_pitch,
             yaw=self.body_yaw,
         )
         self.log_gait_debug(now, feet, joints)
@@ -315,7 +328,13 @@ class VoltMotionController(Node):
         return min(self.max_joint_velocity, JOINT_VELOCITY_LIMITS[index])
 
     def smooth_joint_target(self, target, dt):
-        """Low-pass, velocity-limit, and acceleration-limit joint commands."""
+        """Apply IK smoothing, velocity limits, and acceleration limits.
+
+        The IK smoothing step is exponential:
+        smoothedAngle = previousAngle + alpha * (targetAngle - previousAngle).
+        A small alpha, default 0.12, removes sharp knee/shoulder snaps before
+        the velocity and acceleration guards protect the simulated servos.
+        """
         target = list(target)
         if self.commanded_positions is None:
             return target
@@ -389,11 +408,19 @@ class VoltMotionController(Node):
 
         gait = GAITS[self.gait_name]
         limits = [gait["max_x"], gait["max_y"], gait["max_yaw"]]
-        rates = [
-            max(0.18, gait["max_x"] * 3.0),
-            max(0.12, gait["max_y"] * 3.0),
-            max(1.20, gait["max_yaw"] * 3.0),
-        ]
+        acceleration = gait.get("acceleration")
+        if acceleration is None:
+            rates = [
+                max(0.18, gait["max_x"] * 3.0),
+                max(0.12, gait["max_y"] * 3.0),
+                max(1.20, gait["max_yaw"] * 3.0),
+            ]
+        else:
+            rates = [
+                max(0.05, acceleration),
+                max(0.04, acceleration * 0.55),
+                max(0.50, gait["max_yaw"] * 2.0),
+            ]
         smoothing = clamp(gait.get("smoothing_factor", 0.15), 0.02, 1.0)
         for index in range(3):
             desired[index] = clamp(desired[index], -limits[index], limits[index])

@@ -2,7 +2,11 @@
 
 import json
 import math
+import os
 import sys
+import time
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import rclpy
 from geometry_msgs.msg import Twist
@@ -28,6 +32,11 @@ from PyQt5.QtWidgets import (
 from rclpy.node import Node
 from std_msgs.msg import String
 
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
 
 GAIT_LIMITS = {
     "walk": (0.058, 0.028, 0.32),
@@ -37,6 +46,26 @@ GAIT_LIMITS = {
     "fast_trot": (0.105, 0.045, 0.75),
     "trot": (0.085, 0.035, 0.65),
 }
+
+GAIT_SEQUENCE = ("walk", "slow_trot", "normal_trot", "fast_trot", "amble")
+
+# Default mapping for common Fantech / Xbox-style controllers.
+BUTTON_ACTIONS = {
+    0: "stand",       # A / Cross
+    1: "sit",         # B / Circle
+    2: "stop",        # X / Square
+    3: "step",        # Y / Triangle
+    4: "prev_gait",   # LB / L1
+    5: "next_gait",   # RB / R1
+    6: "reset_pose",  # Back / Select
+    7: "drive_mode",  # Start / Options
+    8: "stop",        # Left stick press
+}
+
+AXIS_LEFT_X = 0
+AXIS_LEFT_Y = 1
+AXIS_RIGHT_X = 2
+GAMEPAD_DEADZONE = 0.10
 
 
 class Joystick(QWidget):
@@ -164,6 +193,15 @@ class VoltControlWindow(QMainWindow):
         self.forward = 0.0
         self.horizontal = 0.0
         self.current_gait = "walk"
+        self.gamepad = None
+        self.gamepad_name = ""
+        self.gamepad_buttons = {}
+        self.gamepad_available = pygame is not None
+        self.gamepad_enabled = True
+        self.last_gamepad_scan = 0.0
+        if self.gamepad_available:
+            pygame.init()
+            pygame.joystick.init()
 
         self.build_ui()
         self.apply_style()
@@ -179,6 +217,10 @@ class VoltControlWindow(QMainWindow):
         self.pose_timer = QTimer(self)
         self.pose_timer.timeout.connect(self.publish_pose)
         self.pose_timer.start(100)
+
+        self.gamepad_timer = QTimer(self)
+        self.gamepad_timer.timeout.connect(self.poll_gamepad)
+        self.gamepad_timer.start(30)
 
         QTimer.singleShot(300, lambda: self.select_gait("walk"))
 
@@ -264,6 +306,24 @@ class VoltControlWindow(QMainWindow):
         self.yaw_slider.setTickInterval(50)
         speed_layout.addRow("Yaw trim", self.yaw_slider)
         left.addWidget(speed_group)
+
+        controller_group = QGroupBox("Controller")
+        controller_layout = QGridLayout(controller_group)
+        self.controller_state = QLabel("NOT CONNECTED")
+        self.controller_state.setObjectName("controllerState")
+        self.controller_detail = QLabel(
+            "Left stick: move/turn | Right stick X: yaw trim\n"
+            "A stand | B sit | X stop | Y step | LB/RB gait"
+        )
+        self.controller_detail.setWordWrap(True)
+        self.controller_enable = QPushButton("GAMEPAD ENABLED")
+        self.controller_enable.setCheckable(True)
+        self.controller_enable.setChecked(True)
+        self.controller_enable.clicked.connect(self.toggle_gamepad)
+        controller_layout.addWidget(self.controller_state, 0, 0, 1, 2)
+        controller_layout.addWidget(self.controller_detail, 1, 0, 1, 2)
+        controller_layout.addWidget(self.controller_enable, 2, 0, 1, 2)
+        left.addWidget(controller_group)
         left.addStretch(1)
         outer.addLayout(left, 4)
 
@@ -349,6 +409,11 @@ class VoltControlWindow(QMainWindow):
             QLabel#state {
                 color: #67e8f9;
                 font-size: 20px;
+                font-weight: 700;
+            }
+            QLabel#controllerState {
+                color: #fbbf24;
+                font-size: 15px;
                 font-weight: 700;
             }
             QGroupBox {
@@ -448,6 +513,134 @@ class VoltControlWindow(QMainWindow):
         self.pitch.setValue(0.0)
         self.yaw.setValue(0.0)
 
+    def toggle_gamepad(self, checked):
+        self.gamepad_enabled = bool(checked)
+        self.controller_enable.setText(
+            "GAMEPAD ENABLED" if self.gamepad_enabled else "GAMEPAD DISABLED"
+        )
+        if not self.gamepad_enabled:
+            self.joystick.set_vector(0.0, 0.0)
+            self.yaw_slider.setValue(0)
+        self.update_gamepad_status()
+
+    def apply_deadzone(self, value):
+        value = float(value)
+        magnitude = abs(value)
+        if magnitude < GAMEPAD_DEADZONE:
+            return 0.0
+        scaled = (magnitude - GAMEPAD_DEADZONE) / (1.0 - GAMEPAD_DEADZONE)
+        return math.copysign(min(1.0, scaled), value)
+
+    def refresh_gamepad(self):
+        if not self.gamepad_available:
+            return
+        now = time.monotonic()
+        if now - self.last_gamepad_scan < 1.0:
+            return
+        self.last_gamepad_scan = now
+
+        pygame.joystick.quit()
+        pygame.joystick.init()
+        if pygame.joystick.get_count() <= 0:
+            self.gamepad = None
+            self.gamepad_name = ""
+            self.gamepad_buttons = {}
+            return
+
+        self.gamepad = pygame.joystick.Joystick(0)
+        self.gamepad.init()
+        self.gamepad_name = self.gamepad.get_name()
+        self.gamepad_buttons = {
+            index: False for index in range(self.gamepad.get_numbuttons())
+        }
+
+    def update_gamepad_status(self):
+        if not self.gamepad_available:
+            self.controller_state.setText("PYGAME NOT INSTALLED")
+            self.controller_state.setStyleSheet("color: #fca5a5;")
+            return
+        if not self.gamepad_enabled:
+            self.controller_state.setText("DISABLED")
+            self.controller_state.setStyleSheet("color: #94a3b8;")
+            return
+        if self.gamepad is None:
+            self.controller_state.setText("NOT CONNECTED")
+            self.controller_state.setStyleSheet("color: #fbbf24;")
+            return
+        self.controller_state.setText("CONNECTED: %s" % self.gamepad_name)
+        self.controller_state.setStyleSheet("color: #86efac;")
+
+    def axis_value(self, axis_index):
+        if self.gamepad is None or axis_index >= self.gamepad.get_numaxes():
+            return 0.0
+        return self.apply_deadzone(self.gamepad.get_axis(axis_index))
+
+    def choose_gait_offset(self, offset):
+        if self.current_gait not in GAIT_SEQUENCE:
+            index = 0
+        else:
+            index = GAIT_SEQUENCE.index(self.current_gait)
+        self.select_gait(GAIT_SEQUENCE[(index + offset) % len(GAIT_SEQUENCE)])
+        for button in self.gait_buttons.buttons():
+            if button.text().replace(" ", "_").lower() == self.current_gait:
+                button.setChecked(True)
+
+    def handle_gamepad_action(self, action):
+        if action == "prev_gait":
+            self.choose_gait_offset(-1)
+        elif action == "next_gait":
+            self.choose_gait_offset(1)
+        elif action == "reset_pose":
+            self.reset_body_pose()
+        elif action == "drive_mode":
+            next_index = (self.drive_mode.currentIndex() + 1) % self.drive_mode.count()
+            self.drive_mode.setCurrentIndex(next_index)
+        else:
+            self.send_action(action)
+
+    def poll_gamepad(self):
+        if not self.gamepad_available:
+            self.update_gamepad_status()
+            return
+
+        pygame.event.pump()
+        if self.gamepad is None or pygame.joystick.get_count() <= 0:
+            self.refresh_gamepad()
+            self.update_gamepad_status()
+            return
+
+        if not self.gamepad_enabled:
+            self.update_gamepad_status()
+            return
+
+        try:
+            left_x = self.axis_value(AXIS_LEFT_X)
+            left_y = self.axis_value(AXIS_LEFT_Y)
+            right_x = self.axis_value(AXIS_RIGHT_X)
+            self.joystick.set_vector(-left_y, left_x)
+            self.yaw_slider.setValue(int(-right_x * 100.0))
+
+            for index in range(self.gamepad.get_numbuttons()):
+                pressed = bool(self.gamepad.get_button(index))
+                was_pressed = self.gamepad_buttons.get(index, False)
+                if pressed and not was_pressed and index in BUTTON_ACTIONS:
+                    self.handle_gamepad_action(BUTTON_ACTIONS[index])
+                self.gamepad_buttons[index] = pressed
+
+            if self.gamepad.get_numhats() > 0:
+                hat_x, _hat_y = self.gamepad.get_hat(0)
+                if hat_x != 0 and not self.gamepad_buttons.get("hat_x", False):
+                    self.choose_gait_offset(1 if hat_x > 0 else -1)
+                    self.gamepad_buttons["hat_x"] = True
+                elif hat_x == 0:
+                    self.gamepad_buttons["hat_x"] = False
+        except pygame.error:
+            self.gamepad = None
+            self.gamepad_name = ""
+            self.gamepad_buttons = {}
+
+        self.update_gamepad_status()
+
     def status_callback(self, message):
         try:
             status = json.loads(message.data)
@@ -476,6 +669,9 @@ class VoltControlWindow(QMainWindow):
     def closeEvent(self, event):
         self.send_action("stop")
         self.publish_motion()
+        if self.gamepad_available:
+            pygame.joystick.quit()
+            pygame.quit()
         self.ros_node.destroy_node()
         event.accept()
 

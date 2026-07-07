@@ -139,54 +139,73 @@ def forward_leg(leg_name, angles):
     return x_planar, y, z
 
 
+class LegIK:
+    """Closed-form IK with workspace projection and joint limit protection."""
+
+    def __init__(self, leg_name):
+        self.leg_name = leg_name
+        self.side = LEG_SIDE[leg_name]
+
+    def project_target(self, target):
+        """Clamp unreachable toe targets before solving the joint angles."""
+        x, y, z = target
+        hip_y = self.side * HIP_OFFSET
+
+        yz_radius = math.hypot(y, z)
+        minimum_yz = HIP_OFFSET + 1e-5
+        if yz_radius < minimum_yz:
+            scale = minimum_yz / max(yz_radius, 1e-9)
+            y *= scale
+            z *= scale
+            yz_radius = minimum_yz
+
+        z_planar = -math.sqrt(
+            max(1e-10, yz_radius * yz_radius - HIP_OFFSET ** 2)
+        )
+        down = -z_planar
+        forward = -x
+        reach = math.hypot(down, forward)
+        minimum_reach = abs(LOWER_LEG_LENGTH - UPPER_LEG_LENGTH) + 0.003
+        maximum_reach = UPPER_LEG_LENGTH + LOWER_LEG_LENGTH - 0.002
+        projected_reach = clamp(reach, minimum_reach, maximum_reach)
+        if abs(projected_reach - reach) > 1e-9:
+            scale = projected_reach / max(reach, 1e-9)
+            down *= scale
+            forward *= scale
+
+        return y, z, hip_y, z_planar, down, forward
+
+    def solve(self, target):
+        """Solve one leg and clamp hip, knee, and shoulder to safe limits."""
+        y, z, hip_y, z_planar, down, forward = self.project_target(target)
+
+        denominator = HIP_OFFSET ** 2 + z_planar ** 2
+        cos_roll = (hip_y * y + z_planar * z) / denominator
+        sin_roll = (-z_planar * y + hip_y * z) / denominator
+        shoulder = math.atan2(sin_roll, cos_roll)
+
+        cosine_foot = (
+            down * down
+            + forward * forward
+            - UPPER_LEG_LENGTH ** 2
+            - LOWER_LEG_LENGTH ** 2
+        ) / (2.0 * UPPER_LEG_LENGTH * LOWER_LEG_LENGTH)
+        foot = -math.acos(clamp(cosine_foot, -1.0, 1.0))
+        leg = math.atan2(forward, down) - math.atan2(
+            LOWER_LEG_LENGTH * math.sin(foot),
+            UPPER_LEG_LENGTH + LOWER_LEG_LENGTH * math.cos(foot),
+        )
+
+        return (
+            clamp(shoulder, *SHOULDER_LIMIT),
+            clamp(leg, *LEG_LIMIT),
+            clamp(foot, *FOOT_LIMIT),
+        )
+
+
 def inverse_leg(leg_name, target):
-    """Solve one leg, projecting small out-of-workspace commands safely."""
-    x, y, z = target
-    side = LEG_SIDE[leg_name]
-    hip_y = side * HIP_OFFSET
-
-    yz_radius = math.hypot(y, z)
-    minimum_yz = HIP_OFFSET + 1e-5
-    if yz_radius < minimum_yz:
-        scale = minimum_yz / max(yz_radius, 1e-9)
-        y *= scale
-        z *= scale
-        yz_radius = minimum_yz
-
-    z_planar = -math.sqrt(max(1e-10, yz_radius * yz_radius - HIP_OFFSET ** 2))
-    denominator = HIP_OFFSET ** 2 + z_planar ** 2
-    cos_roll = (hip_y * y + z_planar * z) / denominator
-    sin_roll = (-z_planar * y + hip_y * z) / denominator
-    shoulder = math.atan2(sin_roll, cos_roll)
-
-    down = -z_planar
-    forward = -x
-    reach = math.hypot(down, forward)
-    minimum_reach = abs(LOWER_LEG_LENGTH - UPPER_LEG_LENGTH) + 0.003
-    maximum_reach = UPPER_LEG_LENGTH + LOWER_LEG_LENGTH - 0.002
-    projected_reach = clamp(reach, minimum_reach, maximum_reach)
-    if abs(projected_reach - reach) > 1e-9:
-        scale = projected_reach / max(reach, 1e-9)
-        down *= scale
-        forward *= scale
-
-    cosine_foot = (
-        down * down
-        + forward * forward
-        - UPPER_LEG_LENGTH ** 2
-        - LOWER_LEG_LENGTH ** 2
-    ) / (2.0 * UPPER_LEG_LENGTH * LOWER_LEG_LENGTH)
-    foot = -math.acos(clamp(cosine_foot, -1.0, 1.0))
-    leg = math.atan2(forward, down) - math.atan2(
-        LOWER_LEG_LENGTH * math.sin(foot),
-        UPPER_LEG_LENGTH + LOWER_LEG_LENGTH * math.cos(foot),
-    )
-
-    return (
-        clamp(shoulder, *SHOULDER_LIMIT),
-        clamp(leg, *LEG_LIMIT),
-        clamp(foot, *FOOT_LIMIT),
-    )
+    """Solve one leg, projecting out-of-workspace commands safely."""
+    return LegIK(leg_name).solve(target)
 
 
 def rotation_matrix(roll, pitch, yaw):
@@ -217,7 +236,12 @@ def feet_to_joint_positions(
     pitch=0.0,
     yaw=0.0,
 ):
-    """Convert body-frame foot positions into all 12 joint commands."""
+    """Convert body/local foot positions into all 12 joint commands.
+
+    Gait code may lock feet in world coordinates during stance. Before IK, those
+    world footholds must be transformed back into this body/local frame so the
+    solver sees the target relative to the moving body and shoulder origin.
+    """
     rotation = rotation_matrix(roll, pitch, yaw)
     body_translation = (body_x, body_y, height - NOMINAL_HEIGHT)
     positions = []

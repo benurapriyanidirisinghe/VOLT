@@ -17,40 +17,54 @@ from volt_kinematics import LEG_ORDER, NOMINAL_FEET, clamp, smootherstep
 
 
 def trot_config(
-    step_length,
+    stride_length,
     step_height,
     gait_frequency,
-    duty_factor,
+    swing_ratio,
     max_x,
     max_y,
     max_yaw,
-    smoothing_factor,
+    acceleration,
+    smoothing_alpha=0.12,
 ):
-    """Create a continuous diagonal-trot configuration.
-
-    During stance, a planted foot travels opposite the commanded body velocity.
-    The maximum stance travel is bounded by step_length. Swing then returns the
-    foot smoothly to the next touchdown point.
-    """
+    """Create a world-locked diagonal-trot configuration."""
+    stance_ratio = 1.0 - swing_ratio
+    max_speed = max(max_x, max_y)
     return {
         "type": "phase_trot",
-        "step_length": step_length,
-        "lateral_step_length": min(0.050, step_length * 0.45),
+        "strideLength": stride_length,
+        "stepHeight": step_height,
+        "bodyHeight": 0.200,
+        "gaitFrequency": gait_frequency,
+        "swingRatio": swing_ratio,
+        "stanceRatio": stance_ratio,
+        "smoothingAlpha": smoothing_alpha,
+        "maxSpeed": max_speed,
+        "acceleration": acceleration,
+        "stride_length": stride_length,
+        "lateral_stride_length": min(0.050, stride_length * 0.45),
         "step_height": step_height,
         "body_height": 0.200,
         "gait_frequency": gait_frequency,
         "period": 1.0 / gait_frequency,
-        "duty_factor": duty_factor,
-        "swing_time": (1.0 - duty_factor) / gait_frequency,
+        "swing_ratio": swing_ratio,
+        "stance_ratio": stance_ratio,
+        "swing_time": swing_ratio / gait_frequency,
+        "stance_time": stance_ratio / gait_frequency,
         "max_x": max_x,
         "max_y": max_y,
         "max_yaw": max_yaw,
-        "max_step_x": step_length,
-        "max_step_y": min(0.050, step_length * 0.45),
+        "max_step_x": stride_length,
+        "max_step_y": min(0.050, stride_length * 0.45),
+        "max_speed": max_speed,
+        "acceleration": acceleration,
         "body_shift_x": 0.0,
         "body_shift_y": 0.0,
         "shift_time": 0.0,
-        "smoothing_factor": smoothing_factor,
+        "smoothing_factor": smoothing_alpha,
+        "body_bob": 0.004,
+        "body_roll": 0.018,
+        "body_pitch": 0.020,
         "settle_time": 0.35,
     }
 
@@ -115,38 +129,41 @@ GAITS = {
     # Smooth diagonal trot modes. Pair 1 is front_left + rear_right.
     # Pair 2 is front_right + rear_left. Pair 2 is always 180 deg out of phase.
     "slow_trot": trot_config(
-        step_length=0.060,
-        step_height=0.010,
+        stride_length=0.060,
+        step_height=0.018,
         gait_frequency=1.00,
-        duty_factor=0.62,
+        swing_ratio=0.35,
         max_x=0.058,
         max_y=0.025,
         max_yaw=0.40,
-        smoothing_factor=0.55,
+        acceleration=0.18,
     ),
     "normal_trot": trot_config(
-        step_length=0.075,
-        step_height=0.010,
+        stride_length=0.075,
+        step_height=0.022,
         gait_frequency=1.30,
-        duty_factor=0.58,
+        swing_ratio=0.35,
         max_x=0.085,
         max_y=0.035,
         max_yaw=0.65,
-        smoothing_factor=0.65,
+        acceleration=0.24,
     ),
     "fast_trot": trot_config(
-        step_length=0.090,
-        step_height=0.010,
+        stride_length=0.090,
+        step_height=0.026,
         gait_frequency=1.50,
-        duty_factor=0.55,
+        swing_ratio=0.35,
         max_x=0.105,
         max_y=0.045,
         max_yaw=0.75,
-        smoothing_factor=0.75,
+        acceleration=0.30,
     ),
 }
 
-# Keep the original command name working. It now means the tuned normal trot.
+# Keep the common command names on the world-locked natural trot path. The GUI
+# still publishes "walk" first, so make that button use the improved trot
+# instead of the older body-frame foot animation.
+GAITS["walk"] = dict(GAITS["slow_trot"])
 GAITS["trot"] = dict(GAITS["normal_trot"])
 
 TROT_PHASE_OFFSETS = {
@@ -166,6 +183,12 @@ def rotate_z(point, angle):
     sine = math.sin(angle)
     x, y, z = point
     return cosine * x - sine * y, sine * x + cosine * y, z
+
+
+def rotate_xy(x, y, angle):
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    return cosine * x - sine * y, sine * x + cosine * y
 
 
 def periodic_elapsed(phase, start, period):
@@ -208,6 +231,10 @@ class VoltGaitController:
         self.settling = False
         self.settled_legs = set()
         self.start_time = None
+        self.body_x_world = 0.0
+        self.body_y_world = 0.0
+        self.body_yaw_world = 0.0
+        self.world_feet = copy_feet(NOMINAL_FEET)
         self.settle_start_time = None
         self.settle_origins = copy_feet(NOMINAL_FEET)
         self.crab_mode = False
@@ -225,6 +252,11 @@ class VoltGaitController:
             "swing_legs": [],
             "stance_legs": list(LEG_ORDER),
             "feet": copy_feet(NOMINAL_FEET),
+            "body_motion": {
+                "height": 0.0,
+                "roll": 0.0,
+                "pitch": 0.0,
+            },
         }
 
     @property
@@ -238,6 +270,10 @@ class VoltGaitController:
         self.feet = copy_feet(NOMINAL_FEET)
         self.active = False
         self.settling = False
+        self.body_x_world = 0.0
+        self.body_y_world = 0.0
+        self.body_yaw_world = 0.0
+        self.world_feet = copy_feet(NOMINAL_FEET)
         self.settled_legs.clear()
         self.start_time = now
         self.settle_start_time = None
@@ -272,6 +308,62 @@ class VoltGaitController:
         }
         self.settling = False
         self.settled_legs.clear()
+
+    def body_to_world(self, point, body_x=None, body_y=None, body_yaw=None):
+        """Transform a body/local foot point into the gait world frame."""
+        if body_x is None:
+            body_x = self.body_x_world
+        if body_y is None:
+            body_y = self.body_y_world
+        if body_yaw is None:
+            body_yaw = self.body_yaw_world
+        x, y, z = point
+        world_x, world_y = rotate_xy(x, y, body_yaw)
+        return body_x + world_x, body_y + world_y, z
+
+    def world_to_body(self, point):
+        """Convert a locked world foothold into the current body/local frame."""
+        x, y, z = point
+        local_x, local_y = rotate_xy(
+            x - self.body_x_world,
+            y - self.body_y_world,
+            -self.body_yaw_world,
+        )
+        return local_x, local_y, z
+
+    def sync_world_feet_from_body(self):
+        self.world_feet = {
+            leg: self.body_to_world(self.feet[leg])
+            for leg in LEG_ORDER
+        }
+
+    def integrate_body_pose(self, velocity, dt):
+        """Move the body through the world while stance feet remain planted."""
+        vx, vy, yaw_rate = velocity
+        world_vx, world_vy = rotate_xy(vx, vy, self.body_yaw_world)
+        self.body_x_world += world_vx * dt
+        self.body_y_world += world_vy * dt
+        self.body_yaw_world += yaw_rate * dt
+
+    def body_motion(self, phase, velocity):
+        """Small natural body bob and attitude compensation for trot support."""
+        config = self.config
+        speed_scale = clamp(
+            math.hypot(velocity[0], velocity[1]) / max(config["max_speed"], 1e-6),
+            0.0,
+            1.0,
+        )
+        yaw_scale = clamp(abs(velocity[2]) / max(config["max_yaw"], 1e-6), 0.0, 1.0)
+        activity = max(speed_scale, yaw_scale)
+        diagonal = math.sin(2.0 * math.pi * phase)
+        double_frequency = 0.5 - 0.5 * math.cos(4.0 * math.pi * phase)
+        return {
+            "height": config["body_bob"] * double_frequency * activity,
+            "roll": config["body_roll"] * diagonal * activity,
+            "pitch": -config["body_pitch"]
+            * math.cos(2.0 * math.pi * phase)
+            * speed_scale,
+        }
 
     def request_stop(self):
         if self.active:
@@ -322,6 +414,44 @@ class VoltGaitController:
             offset_y /= workspace_ratio
 
         return nominal[0] + offset_x, nominal[1] + offset_y, nominal[2]
+
+    def trot_touchdown_world(self, leg_name, velocity):
+        """Pick the next world foothold ahead of the body at swing touchdown."""
+        config = self.config
+        nominal = NOMINAL_FEET[leg_name]
+        vx, vy, yaw_rate = velocity
+        swing_time = config["swing_time"]
+        stance_time = config["stance_time"]
+
+        lead_x = clamp(
+            0.5 * vx * stance_time,
+            -0.5 * config["stride_length"],
+            0.5 * config["stride_length"],
+        )
+        lead_y = clamp(
+            0.5 * vy * stance_time,
+            -0.5 * config["lateral_stride_length"],
+            0.5 * config["lateral_stride_length"],
+        )
+        touchdown_local = (
+            nominal[0] + lead_x,
+            nominal[1] + lead_y,
+            nominal[2],
+        )
+
+        future_vx, future_vy = rotate_xy(vx, vy, self.body_yaw_world)
+        future_x = self.body_x_world + future_vx * swing_time
+        future_y = self.body_y_world + future_vy * swing_time
+        future_yaw = (
+            self.body_yaw_world
+            + yaw_rate * (swing_time + 0.5 * stance_time)
+        )
+        return self.body_to_world(
+            touchdown_local,
+            future_x,
+            future_y,
+            future_yaw,
+        )
 
     def stance_step(self, location, velocity, dt):
         vx, vy, yaw_rate = velocity
@@ -403,39 +533,18 @@ class VoltGaitController:
         )
 
     def phase_trot_swing_step(self, leg_name, swing):
-        """Return a C2 swing path that matches stance speed at touchdown."""
+        """Return a smooth swing arc between old and new world footholds."""
         config = self.config
         origin = self.swing_origins[leg_name]
         target = self.swing_targets[leg_name]
-        start_velocity = self.swing_start_velocities[leg_name]
-        end_velocity = self.swing_end_velocities[leg_name]
-        duration = config["swing_time"]
 
-        x = quintic_hermite(
-            origin[0],
-            target[0],
-            start_velocity[0],
-            end_velocity[0],
-            duration,
-            swing,
-        )
-        y = quintic_hermite(
-            origin[1],
-            target[1],
-            start_velocity[1],
-            end_velocity[1],
-            duration,
-            swing,
-        )
-        ground_z = quintic_hermite(
-            origin[2],
-            target[2],
-            0.0,
-            0.0,
-            duration,
-            swing,
-        )
-        z = ground_z + config["step_height"] * smooth_bump(swing)
+        # Swing phase uses a normalized 0..1 blend. X/Y move from the old
+        # foothold to the next foothold, while Z follows a sinusoidal lift.
+        blend = smootherstep(swing)
+        x = origin[0] + (target[0] - origin[0]) * blend
+        y = origin[1] + (target[1] - origin[1]) * blend
+        ground_z = origin[2] + (target[2] - origin[2]) * blend
+        z = ground_z + config["step_height"] * math.sin(math.pi * swing)
         return x, y, z
 
     def settle_feet(self, now):
@@ -472,6 +581,7 @@ class VoltGaitController:
             self.settling = False
             self.settle_start_time = None
             self.start_time = now
+            self.sync_world_feet_from_body()
 
         if not self.active:
             self.update_debug(0.0, [], list(LEG_ORDER))
@@ -490,50 +600,50 @@ class VoltGaitController:
         if self.settling:
             return self.settle_feet(now)
 
+        self.integrate_body_pose(velocity, dt)
         cycle_phase = self.cycle_phase(now)
-        duty = self.config["duty_factor"]
+        swing_ratio = self.config["swing_ratio"]
         swing_legs = []
         stance_legs = []
         for leg_name in LEG_ORDER:
+            # Pair A (front_left + rear_right) uses phase offset 0.0. Pair B
+            # (front_right + rear_left) uses 0.5, exactly 180 degrees later.
             leg_phase = (
                 cycle_phase + TROT_PHASE_OFFSETS[leg_name]
             ) % 1.0
-            swinging = leg_phase >= duty
+            swinging = leg_phase < swing_ratio
 
             if swinging:
                 if not self.was_swinging[leg_name]:
-                    self.begin_trot_swing(leg_name, velocity)
-                swing = (leg_phase - duty) / (1.0 - duty)
-                self.feet[leg_name] = self.phase_trot_swing_step(
+                    self.swing_origins[leg_name] = self.world_feet[leg_name]
+                    self.swing_targets[leg_name] = self.trot_touchdown_world(
+                        leg_name,
+                        velocity,
+                    )
+                swing = leg_phase / swing_ratio
+                self.world_feet[leg_name] = self.phase_trot_swing_step(
                     leg_name,
                     swing,
                 )
                 swing_legs.append(leg_name)
             else:
                 if self.was_swinging[leg_name]:
-                    self.feet[leg_name] = self.swing_targets[leg_name]
+                    self.world_feet[leg_name] = self.swing_targets[leg_name]
 
-                # A planted foot must move backward in the body frame at the
-                # requested body velocity. Updating this every control tick
-                # creates the forward ground reaction instead of holding a
-                # static stance pose while the opposite pair swings.
-                stance_velocity = velocity
-                if (
-                    step_in_place
-                    and math.hypot(velocity[0], velocity[1]) < 0.002
-                    and abs(velocity[2]) < 0.02
-                ):
-                    stance_velocity = (0.0, 0.0, 0.0)
-                self.feet[leg_name] = self.stance_step(
-                    self.feet[leg_name],
-                    stance_velocity,
-                    dt,
-                )
+                # Stance phase foot locking: do not animate the planted foot in
+                # the body frame. Keep its world coordinate fixed; as the body
+                # integrates forward, world_to_body() makes the body move over
+                # the planted support point without visible ground sliding.
                 stance_legs.append(leg_name)
             self.was_swinging[leg_name] = swinging
 
-        self.update_debug(cycle_phase, swing_legs, stance_legs)
-        return copy_feet(self.feet), (0.0, 0.0), True
+        self.feet = {
+            leg: self.world_to_body(self.world_feet[leg])
+            for leg in LEG_ORDER
+        }
+        body_motion = self.body_motion(cycle_phase, velocity)
+        self.update_debug(cycle_phase, swing_legs, stance_legs, body_motion)
+        return copy_feet(self.feet), body_motion, True
 
     def legacy_step(self, now, dt, velocity, step_in_place=False):
         speed = math.hypot(velocity[0], velocity[1])
@@ -614,12 +724,19 @@ class VoltGaitController:
             return self.phase_trot_step(now, dt, velocity, step_in_place)
         return self.legacy_step(now, dt, velocity, step_in_place)
 
-    def update_debug(self, phase, swing_legs, stance_legs):
+    def update_debug(self, phase, swing_legs, stance_legs, body_motion=None):
+        if body_motion is None:
+            body_motion = {
+                "height": 0.0,
+                "roll": 0.0,
+                "pitch": 0.0,
+            }
         self.debug_state = {
             "phase": phase % 1.0,
             "swing_legs": list(swing_legs),
             "stance_legs": list(stance_legs),
             "feet": copy_feet(self.feet),
+            "body_motion": dict(body_motion),
         }
 
     def debug_snapshot(self):

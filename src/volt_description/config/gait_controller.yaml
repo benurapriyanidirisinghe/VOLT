@@ -11,4 +11,5 @@ volt_motion_controller:
     debug_gait: false
     max_joint_velocity: 4.0
     max_joint_acceleration: 18.0
-    joint_smoothing_factor: 0.90
+    joint_smoothing_factor: 0.12
+    smoothing_alpha: 0.12

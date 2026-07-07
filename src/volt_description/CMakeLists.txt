@@ -16,6 +16,7 @@ install(
     scripts/volt_gait_controller.py
     scripts/volt_kinematics.py
     scripts/volt_motion_controller.py
+    scripts/volt_serial_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
