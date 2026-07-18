@@ -1,0 +1,21 @@
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - front_left_shoulder
+      - front_left_leg
+      - front_left_foot
+      - front_right_shoulder
+      - front_right_leg
+      - front_right_foot
+      - rear_left_shoulder
+      - rear_left_leg
+      - rear_left_foot
+      - rear_right_shoulder
+      - rear_right_leg
+      - rear_right_foot

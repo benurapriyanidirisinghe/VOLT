@@ -1,6 +1,7 @@
 # VOLT Arduino Nano PCA9685 Firmware
 
-This sketch drives 12 servos through a PCA9685 servo driver.
+This sketch drives 12 physical PCA9685 channels. It receives final physical
+servo degrees from the ROS serial bridge; it does not convert ROS radians.
 
 ## Wiring
 
@@ -27,36 +28,43 @@ Baud rate: `115200`
 The Jetson sends newline-terminated commands:
 
 ```text
-RAD r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11
+FRAME d0 d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11
+SERVO channel degrees
 ```
 
-`RAD` values are ROS joint angles in radians, in this order:
-
-```text
-front_left_shoulder front_left_leg front_left_foot
-front_right_shoulder front_right_leg front_right_foot
-rear_left_shoulder rear_left_leg rear_left_foot
-rear_right_shoulder rear_right_leg rear_right_foot
-```
-
-The firmware maps `0.0` radians to the servo neutral position: `90` degrees.
+`FRAME` values are absolute physical servo degrees in PCA channel order.
+The ROS serial bridge performs the named joint radians to physical degrees
+conversion using `config/servo_calibration.yaml`.
 
 Calibration commands:
 
 ```text
 HOME
+ARM
+HOLD
+DISARM
+DISABLE
+STATUS
 PING
-DEG 90 90 90 90 90 90 90 90 90 90 90 90
 ```
+
+On power-up the firmware starts disarmed with PCA9685 output disabled and does
+not move servos. `DISARM` and timeout hold the last target instead of moving to
+center. `DISABLE` turns off PCA9685 pulses and may allow the robot to collapse.
 
 ## First Values To Tune
 
+In `src/volt_description/config/servo_calibration.yaml`:
+
+- `pca_channel`: which physical PCA9685 output controls each joint.
+- `direction`: set to `-1` if the real link moves opposite Gazebo.
+- `neutral_deg`: servo command that places the real joint at URDF zero.
+- `trim_deg`: small final offset around neutral.
+- `min_deg` and `max_deg`: conservative physical limits.
+- `min_pulse_us` and `max_pulse_us`: pulse limits for your servo model.
+
 In `volt_arduino_pca9685.ino`:
 
-- `SERVO_CHANNEL`: change if your wiring order is different.
-- `SERVO_DIRECTION`: set a joint to `-1` if it moves opposite the simulation.
-- `servoTrimDeg`: small offsets so physical zero matches the CAD/URDF zero.
-- `SERVO_MIN_US` and `SERVO_MAX_US`: pulse limits for your servo model.
 - `MAX_DEG_PER_SECOND`: lower this for gentler first hardware tests.
 
 Start with the robot suspended or with legs off the ground.
@@ -66,16 +74,20 @@ Start with the robot suspended or with legs off the ground.
 The Jetson bridge node subscribes to:
 
 ```text
-/joint_group_position_controller/commands
+/joint_command_router/output
 ```
 
-and sends `RAD ...` packets to the Arduino.
+and sends `FRAME ...` packets to the Arduino. The command router is the only
+node that publishes to `/joint_group_position_controller/commands`.
 
 After building the workspace on the Jetson:
 
 ```bash
 source install/setup.bash
-ros2 run volt_description volt_serial_bridge.py --ros-args -p port:=/dev/ttyUSB0
+ros2 run volt_description volt_serial_bridge.py --ros-args \
+  -p port:=/dev/ttyUSB0 \
+  -p dry_run:=true \
+  -p hardware_enabled:=false
 ```
 
 Or start the motion controller and serial bridge together:
@@ -83,6 +95,26 @@ Or start the motion controller and serial bridge together:
 ```bash
 source install/setup.bash
 ros2 launch volt_description hardware_control.launch.py serial_port:=/dev/ttyUSB0
+```
+
+For first hardware tests, leave the Arduino disarmed:
+
+```bash
+ros2 launch volt_description hardware_control.launch.py \
+  serial_port:=/dev/ttyUSB0 \
+  dry_run:=true \
+  hardware_enabled:=false \
+  auto_arm:=false
+```
+
+After confirming the physical center pose is correct, run with live commands:
+
+```bash
+ros2 launch volt_description hardware_control.launch.py \
+  serial_port:=/dev/ttyUSB0 \
+  dry_run:=false \
+  hardware_enabled:=true \
+  auto_arm:=true
 ```
 
 If your Arduino appears as `/dev/ttyACM0`, change the `serial_port` or `port`

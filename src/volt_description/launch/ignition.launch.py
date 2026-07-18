@@ -1,7 +1,7 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, SetEnvironmentVariable, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
@@ -29,7 +29,8 @@ def generate_launch_description():
     robot_description = {
         "robot_description": Command([
             "xacro ",
-            xacro_file
+            xacro_file,
+            " sim_backend:=gz"
         ])
     }
 
@@ -130,17 +131,6 @@ def generate_launch_description():
         output="screen"
     )
 
-    set_gazebo_position_gain = ExecuteProcess(
-        cmd=[
-            "bash",
-            "-lc",
-            "for i in {1..20}; do "
-            "ros2 param set /gz_ros2_control position_proportional_gain 0.35 "
-            "&& exit 0; sleep 0.5; done; exit 1",
-        ],
-        output="screen",
-    )
-
     return LaunchDescription([
         DeclareLaunchArgument(
             "gui",
@@ -165,11 +155,6 @@ def generate_launch_description():
         TimerAction(
             period=7.0,
             actions=[joint_state_broadcaster_spawner]
-        ),
-
-        TimerAction(
-            period=8.0,
-            actions=[set_gazebo_position_gain]
         ),
 
         TimerAction(

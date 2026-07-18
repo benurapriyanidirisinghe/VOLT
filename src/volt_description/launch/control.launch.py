@@ -8,6 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     use_gui = LaunchConfiguration("gui")
+    auto_ready_pose = LaunchConfiguration("auto_ready_pose")
     config_file = PathJoinSubstitution([
         FindPackageShare("volt_description"),
         "config",
@@ -19,7 +20,17 @@ def generate_launch_description():
         executable="volt_motion_controller.py",
         name="volt_motion_controller",
         output="screen",
-        parameters=[config_file],
+        parameters=[
+            config_file,
+            {"auto_ready_pose": auto_ready_pose},
+        ],
+    )
+
+    command_router = Node(
+        package="volt_description",
+        executable="volt_joint_command_router.py",
+        name="volt_joint_command_router",
+        output="screen",
     )
 
     gui = Node(
@@ -35,6 +46,12 @@ def generate_launch_description():
             default_value="true",
             description="Start the VOLT PyQt control window",
         ),
+        DeclareLaunchArgument(
+            "auto_ready_pose",
+            default_value="false",
+            description="Automatically move from loaded zero pose to walk-ready pose",
+        ),
+        command_router,
         controller,
         gui,
     ])

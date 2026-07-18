@@ -17,6 +17,13 @@ def generate_launch_description():
             ":/home/ros2/Documents/volt_ws/src"
         ]
     )
+    gazebo_plugin_path = SetEnvironmentVariable(
+        name="GAZEBO_PLUGIN_PATH",
+        value=[
+            os.environ.get("GAZEBO_PLUGIN_PATH", ""),
+            ":/opt/ros/humble/lib"
+        ]
+    )
 
     gui = LaunchConfiguration("gui")
 
@@ -35,7 +42,8 @@ def generate_launch_description():
     robot_description = {
         "robot_description": Command([
             "xacro ",
-            xacro_file
+            xacro_file,
+            " sim_backend:=classic"
         ])
     }
 
@@ -109,6 +117,7 @@ def generate_launch_description():
         ),
 
         gazebo_model_path,
+        gazebo_plugin_path,
         gazebo,
         robot_state_publisher,
         spawn_robot,

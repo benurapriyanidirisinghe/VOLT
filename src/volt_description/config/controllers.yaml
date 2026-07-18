@@ -8,6 +8,9 @@ controller_manager:
     joint_group_position_controller:
       type: position_controllers/JointGroupPositionController
 
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
 
 joint_group_position_controller:
   ros__parameters:
@@ -29,6 +32,31 @@ joint_group_position_controller:
       - rear_right_foot
 
     interface_name: position
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints:
+      - front_left_shoulder
+      - front_left_leg
+      - front_left_foot
+
+      - front_right_shoulder
+      - front_right_leg
+      - front_right_foot
+
+      - rear_left_shoulder
+      - rear_left_leg
+      - rear_left_foot
+
+      - rear_right_shoulder
+      - rear_right_leg
+      - rear_right_foot
+
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
 
 gz_ros2_control:
   ros__parameters:

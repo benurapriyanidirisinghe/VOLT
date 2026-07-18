@@ -32,7 +32,7 @@ class VoltMotionController(Node):
         self.declare_parameter("joint_error_limit", 0.45)
         self.declare_parameter("stand_duration", 4.0)
         self.declare_parameter("sit_duration", 4.7)
-        self.declare_parameter("auto_ready_pose", True)
+        self.declare_parameter("auto_ready_pose", False)
         self.declare_parameter("body_height", 0.200)
         self.declare_parameter("debug_gait", False)
         self.declare_parameter("max_joint_velocity", 4.0)
@@ -60,7 +60,7 @@ class VoltMotionController(Node):
 
         self.command_publisher = self.create_publisher(
             Float64MultiArray,
-            "/joint_group_position_controller/commands",
+            "/volt/joint_commands/motion",
             10,
         )
         self.status_publisher = self.create_publisher(

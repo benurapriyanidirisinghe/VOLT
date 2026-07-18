@@ -1,0 +1,123 @@
+joint_order:
+  - front_left_shoulder
+  - front_left_leg
+  - front_left_foot
+  - front_right_shoulder
+  - front_right_leg
+  - front_right_foot
+  - rear_left_shoulder
+  - rear_left_leg
+  - rear_left_foot
+  - rear_right_shoulder
+  - rear_right_leg
+  - rear_right_foot
+
+servos:
+  front_left_shoulder:
+    pca_channel: 3
+    direction: 1
+    neutral_deg: 120.0
+    trim_deg: 0.0
+    min_deg: 70.0
+    max_deg: 160.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  front_left_leg:
+    pca_channel: 1
+    direction: 1
+    neutral_deg: 60.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  front_left_foot:
+    pca_channel: 2
+    direction: -1
+    neutral_deg: 0.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 150.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  front_right_shoulder:
+    pca_channel: 0
+    direction: -1
+    neutral_deg: 120.0
+    trim_deg: 0.0
+    min_deg: 70.0
+    max_deg: 160.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  front_right_leg:
+    pca_channel: 4
+    direction: -1
+    neutral_deg: 120.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  front_right_foot:
+    pca_channel: 5
+    direction: 1
+    neutral_deg: 180.0
+    trim_deg: 0.0
+    min_deg: 30.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_left_shoulder:
+    pca_channel: 9
+    direction: -1
+    neutral_deg: 93.10
+    trim_deg: 0.0
+    min_deg: 50.0
+    max_deg: 140.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_left_leg:
+    pca_channel: 7
+    direction: 1
+    neutral_deg: 60.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_left_foot:
+    pca_channel: 8
+    direction: 1
+    neutral_deg: 180.0
+    trim_deg: 0.0
+    min_deg: 30.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_right_shoulder:
+    pca_channel: 6
+    direction: -1
+    neutral_deg: 104.15
+    trim_deg: 0.0
+    min_deg: 50.0
+    max_deg: 140.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_right_leg:
+    pca_channel: 10
+    direction: -1
+    neutral_deg: 120.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 180.0
+    min_pulse_us: 600
+    max_pulse_us: 2400
+  rear_right_foot:
+    pca_channel: 11
+    direction: -1
+    neutral_deg: 0.0
+    trim_deg: 0.0
+    min_deg: 0.0
+    max_deg: 150.0
+    min_pulse_us: 600
+    max_pulse_us: 2400

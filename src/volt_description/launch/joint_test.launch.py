@@ -1,33 +1,32 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    pkg_share = FindPackageShare("volt_description")
     serial_port = LaunchConfiguration("serial_port")
     baud_rate = LaunchConfiguration("baud_rate")
-    auto_ready_pose = LaunchConfiguration("auto_ready_pose")
+    gazebo_gui = LaunchConfiguration("gazebo_gui")
     auto_arm = LaunchConfiguration("auto_arm")
     dry_run = LaunchConfiguration("dry_run")
-    hardware_enabled = LaunchConfiguration("hardware_enabled")
+    use_hardware = LaunchConfiguration("use_hardware")
     calibration_file = LaunchConfiguration("calibration_file")
-    config_file = PathJoinSubstitution([
-        FindPackageShare("volt_description"),
-        "config",
-        "gait_controller.yaml",
-    ])
 
-    motion_controller = Node(
-        package="volt_description",
-        executable="volt_motion_controller.py",
-        name="volt_motion_controller",
-        output="screen",
-        parameters=[
-            config_file,
-            {"auto_ready_pose": auto_ready_pose},
-        ],
+    ignition_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                pkg_share,
+                "launch",
+                "ignition.launch.py",
+            ])
+        ),
+        launch_arguments={
+            "gui": gazebo_gui,
+        }.items(),
     )
 
     serial_bridge = Node(
@@ -40,7 +39,7 @@ def generate_launch_description():
             "baud_rate": baud_rate,
             "auto_arm": auto_arm,
             "dry_run": dry_run,
-            "hardware_enabled": hardware_enabled,
+            "hardware_enabled": use_hardware,
             "calibration_file": calibration_file,
         }],
     )
@@ -49,6 +48,13 @@ def generate_launch_description():
         package="volt_description",
         executable="volt_joint_command_router.py",
         name="volt_joint_command_router",
+        output="screen",
+    )
+
+    joint_test_gui = Node(
+        package="volt_description",
+        executable="volt_joint_test_gui.py",
+        name="volt_joint_test_gui",
         output="screen",
     )
 
@@ -64,9 +70,9 @@ def generate_launch_description():
             description="Arduino firmware baud rate",
         ),
         DeclareLaunchArgument(
-            "auto_ready_pose",
-            default_value="false",
-            description="Automatically move from loaded zero pose to walk-ready pose",
+            "gazebo_gui",
+            default_value="true",
+            description="Start Gazebo GUI",
         ),
         DeclareLaunchArgument(
             "auto_arm",
@@ -76,10 +82,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "dry_run",
             default_value="true",
-            description="Do not open serial; log outgoing FRAME packets",
+            description="Log outgoing FRAME packets without opening serial",
         ),
         DeclareLaunchArgument(
-            "hardware_enabled",
+            "use_hardware",
             default_value="false",
             description="Allow serial bridge to open Arduino serial port",
         ),
@@ -92,7 +98,8 @@ def generate_launch_description():
             ]),
             description="Servo calibration YAML file",
         ),
-        command_router,
-        motion_controller,
-        serial_bridge,
+        ignition_launch,
+        TimerAction(period=11.0, actions=[command_router]),
+        TimerAction(period=12.0, actions=[serial_bridge]),
+        TimerAction(period=14.0, actions=[joint_test_gui]),
     ])

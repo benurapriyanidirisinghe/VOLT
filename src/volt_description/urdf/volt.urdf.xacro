@@ -4,6 +4,8 @@
 <xacro:include filename="$(find volt_description)/urdf/ros2_control.xacro"/>
 <xacro:include filename="$(find volt_description)/urdf/gazebo.xacro"/>
 
+<xacro:arg name="sim_backend" default="gz"/>
+
   <material name="yellow">
     <color rgba="0.92 0.83 0.0 1"/>
   </material>
@@ -340,5 +342,5 @@
   <xacro:gen_full_leg_joint pos="front_right" shiftx="${shiftx}" shifty="-${shifty}" shift="-${shift}" left="false"/>
   <xacro:gen_full_leg_joint pos="rear_left" shiftx="-${shiftx}" shifty="${shifty}" shift="${shift}" left="true"/>
   <xacro:gen_full_leg_joint pos="rear_right" shiftx="-${shiftx}" shifty="-${shifty}" shift="-${shift}" left="false"/>
-  <xacro:volt_ros2_control/>
+  <xacro:volt_ros2_control sim_backend="$(arg sim_backend)"/>
 </robot>

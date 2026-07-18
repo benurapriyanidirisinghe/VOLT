@@ -1,0 +1,22 @@
+name: sit
+description: Controlled sit pose matching the existing VOLT sit joint target.
+joint_names:
+  - front_left_shoulder
+  - front_left_leg
+  - front_left_foot
+  - front_right_shoulder
+  - front_right_leg
+  - front_right_foot
+  - rear_left_shoulder
+  - rear_left_leg
+  - rear_left_foot
+  - rear_right_shoulder
+  - rear_right_leg
+  - rear_right_foot
+points:
+  - time_from_start: 0.0
+    positions: [0.0496, 0.4992, -1.0812, -0.0496, 0.4992, -1.0812, 0.0496, 0.6956, -1.0812, -0.0496, 0.6956, -1.0812]
+  - time_from_start: 1.2
+    positions: [0.0, 0.8, -2.2, 0.0, 0.8, -2.2, 0.0, 0.9, -2.2, 0.0, 0.9, -2.2]
+  - time_from_start: 2.8
+    positions: [0.548, 1.548, -2.6, -0.548, 1.548, -2.6, 0.548, 1.548, -2.6, -0.548, 1.548, -2.6]

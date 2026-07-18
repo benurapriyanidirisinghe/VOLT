@@ -4,6 +4,7 @@ log/
 
 .agents/
 .codex/
+.vscode/
 
 __pycache__/
 *.py[cod]

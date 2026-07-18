@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import signal
 import sys
 import time
 
@@ -165,22 +166,50 @@ class Joystick(QWidget):
 
 
 class VoltGuiNode(Node):
-    def __init__(self, status_callback):
+    def __init__(self, status_callback, serial_status_callback):
         super().__init__("volt_control_gui")
         self.velocity_publisher = self.create_publisher(Twist, "/cmd_vel", 10)
         self.action_publisher = self.create_publisher(String, "/volt/action", 10)
         self.gait_publisher = self.create_publisher(String, "/volt/gait", 10)
+        self.owner_publisher = self.create_publisher(String, "/volt/command_owner", 10)
+        self.serial_command_publisher = self.create_publisher(
+            String,
+            "/volt/serial_command",
+            10,
+        )
         self.pose_publisher = self.create_publisher(
             Twist,
             "/volt/body_pose",
             10,
         )
         self.create_subscription(String, "/volt/status", status_callback, 10)
+        self.create_subscription(
+            String,
+            "/volt/serial_status",
+            serial_status_callback,
+            10,
+        )
 
     def publish_text(self, publisher, text):
+        if not rclpy.ok():
+            return False
         message = String()
         message.data = text
-        publisher.publish(message)
+        try:
+            publisher.publish(message)
+            return True
+        except Exception:
+            return False
+
+    def claim_motion_owner(self):
+        return self.publish_text(self.owner_publisher, "MOTION")
+
+    def send_serial_command(self, command):
+        allowed = ("ARM", "HOLD", "DISARM", "DISABLE", "STATUS", "PING")
+        command = command.strip().upper()
+        if command not in allowed:
+            return False
+        return self.publish_text(self.serial_command_publisher, command)
 
 
 class VoltControlWindow(QMainWindow):
@@ -189,7 +218,11 @@ class VoltControlWindow(QMainWindow):
         self.setWindowTitle("VOLT Motion Control")
         self.resize(920, 620)
 
-        self.ros_node = VoltGuiNode(self.status_callback)
+        self.ros_node = VoltGuiNode(
+            self.status_callback,
+            self.serial_status_callback,
+        )
+        self.shutting_down = False
         self.forward = 0.0
         self.horizontal = 0.0
         self.current_gait = "walk"
@@ -259,6 +292,35 @@ class VoltControlWindow(QMainWindow):
         state_layout.addWidget(sit_button, 2, 1)
         state_layout.addWidget(stop_button, 2, 2)
         left.addWidget(state_group)
+
+        hardware_group = QGroupBox("Arduino Hardware")
+        hardware_layout = QGridLayout(hardware_group)
+        self.hardware_state = QLabel("SERIAL: UNKNOWN")
+        self.hardware_state.setObjectName("hardwareState")
+        self.hardware_detail = QLabel(
+            "Start volt_serial_bridge with hardware enabled to move the real robot."
+        )
+        self.hardware_detail.setWordWrap(True)
+        hardware_layout.addWidget(self.hardware_state, 0, 0, 1, 4)
+        hardware_layout.addWidget(self.hardware_detail, 1, 0, 1, 4)
+
+        arm_button = QPushButton("ARM")
+        arm_button.clicked.connect(lambda: self.send_serial_command("ARM"))
+        hold_button = QPushButton("HOLD")
+        hold_button.clicked.connect(lambda: self.send_serial_command("HOLD"))
+        disarm_button = QPushButton("DISARM")
+        disarm_button.clicked.connect(lambda: self.send_serial_command("DISARM"))
+        disable_button = QPushButton("DISABLE")
+        disable_button.clicked.connect(lambda: self.send_serial_command("DISABLE"))
+        status_button = QPushButton("STATUS")
+        status_button.clicked.connect(lambda: self.send_serial_command("STATUS"))
+
+        hardware_layout.addWidget(arm_button, 2, 0)
+        hardware_layout.addWidget(hold_button, 2, 1)
+        hardware_layout.addWidget(disarm_button, 2, 2)
+        hardware_layout.addWidget(disable_button, 2, 3)
+        hardware_layout.addWidget(status_button, 3, 0, 1, 4)
+        left.addWidget(hardware_group)
 
         gait_group = QGroupBox("Gait")
         gait_layout = QGridLayout(gait_group)
@@ -416,6 +478,11 @@ class VoltControlWindow(QMainWindow):
                 font-size: 15px;
                 font-weight: 700;
             }
+            QLabel#hardwareState {
+                color: #fbbf24;
+                font-size: 15px;
+                font-weight: 700;
+            }
             QGroupBox {
                 border: 1px solid #263449;
                 border-radius: 10px;
@@ -471,16 +538,29 @@ class VoltControlWindow(QMainWindow):
         self.horizontal = horizontal
 
     def select_gait(self, gait):
+        if self.shutting_down or not rclpy.ok():
+            return
         self.current_gait = gait
+        self.ros_node.claim_motion_owner()
         self.ros_node.publish_text(self.ros_node.gait_publisher, gait)
 
     def send_action(self, action):
+        if self.shutting_down or not rclpy.ok():
+            return
         if action in ("stop", "sit"):
             self.joystick.set_vector(0.0, 0.0)
             self.yaw_slider.setValue(0)
+        self.ros_node.claim_motion_owner()
         self.ros_node.publish_text(self.ros_node.action_publisher, action)
 
+    def send_serial_command(self, command):
+        if self.shutting_down or not rclpy.ok():
+            return
+        self.ros_node.send_serial_command(command)
+
     def publish_motion(self):
+        if self.shutting_down or not rclpy.ok():
+            return
         speed = self.speed_slider.value() / 100.0
         max_x, max_y, max_yaw = GAIT_LIMITS[self.current_gait]
         message = Twist()
@@ -493,9 +573,16 @@ class VoltControlWindow(QMainWindow):
             message.angular.z = (
                 self.yaw_slider.value() / 100.0 * max_yaw * speed
             )
-        self.ros_node.velocity_publisher.publish(message)
+        try:
+            if abs(message.linear.x) > 1e-6 or abs(message.linear.y) > 1e-6 or abs(message.angular.z) > 1e-6:
+                self.ros_node.claim_motion_owner()
+            self.ros_node.velocity_publisher.publish(message)
+        except Exception:
+            return
 
     def publish_pose(self):
+        if self.shutting_down or not rclpy.ok():
+            return
         message = Twist()
         message.linear.x = self.body_x.value()
         message.linear.y = self.body_y.value()
@@ -503,7 +590,10 @@ class VoltControlWindow(QMainWindow):
         message.angular.x = math.radians(self.roll.value())
         message.angular.y = math.radians(self.pitch.value())
         message.angular.z = math.radians(self.yaw.value())
-        self.ros_node.pose_publisher.publish(message)
+        try:
+            self.ros_node.pose_publisher.publish(message)
+        except Exception:
+            return
 
     def reset_body_pose(self):
         self.height.setValue(0.200)
@@ -663,16 +753,102 @@ class VoltControlWindow(QMainWindow):
         self.status_detail.setText(detail)
         self.step_button.setChecked(bool(status.get("step_in_place")))
 
-    def spin_ros(self):
-        rclpy.spin_once(self.ros_node, timeout_sec=0.0)
+    def serial_status_callback(self, message):
+        fields = {}
+        for part in message.data.split():
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            fields[key] = value
 
-    def closeEvent(self, event):
-        self.send_action("stop")
-        self.publish_motion()
+        connected = fields.get("connected") == "1"
+        ready = fields.get("ready") == "1"
+        armed = fields.get("armed") == "1"
+        dry_run = fields.get("dry_run") == "1"
+        hardware_enabled = fields.get("hardware_enabled") == "1"
+
+        if dry_run or not hardware_enabled:
+            state = "SERIAL: DRY RUN"
+            color = "#fbbf24"
+        elif connected and ready and armed:
+            state = "SERIAL: ARMED"
+            color = "#86efac"
+        elif connected and ready:
+            state = "SERIAL: READY"
+            color = "#7dd3fc"
+        elif connected:
+            state = "SERIAL: CONNECTING"
+            color = "#fbbf24"
+        else:
+            state = "SERIAL: OFFLINE"
+            color = "#fca5a5"
+
+        details = []
+        details.append("connected=%s" % fields.get("connected", "?"))
+        details.append("ready=%s" % fields.get("ready", "?"))
+        details.append("armed=%s" % fields.get("armed", "?"))
+        details.append("dry_run=%s" % fields.get("dry_run", "?"))
+        details.append("hardware=%s" % fields.get("hardware_enabled", "?"))
+        response = fields.get("response")
+        error = fields.get("error")
+        if response:
+            details.append("response=%s" % response)
+        if error:
+            details.append("error=%s" % error)
+
+        self.hardware_state.setText(state)
+        self.hardware_state.setStyleSheet("color: %s;" % color)
+        self.hardware_detail.setText(" | ".join(details))
+
+    def spin_ros(self):
+        if self.shutting_down or not rclpy.ok():
+            return
+        try:
+            rclpy.spin_once(self.ros_node, timeout_sec=0.0)
+        except Exception:
+            if self.shutting_down or not rclpy.ok():
+                return
+            raise
+
+    def stop_timers(self):
+        for timer in (
+            self.spin_timer,
+            self.command_timer,
+            self.pose_timer,
+            self.gamepad_timer,
+        ):
+            timer.stop()
+
+    def publish_shutdown_stop(self):
+        if not rclpy.ok():
+            return
+        stop_action = String()
+        stop_action.data = "stop"
+        zero_velocity = Twist()
+        try:
+            self.ros_node.action_publisher.publish(stop_action)
+            self.ros_node.velocity_publisher.publish(zero_velocity)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        if self.shutting_down:
+            return
+        self.stop_timers()
+        self.forward = 0.0
+        self.horizontal = 0.0
+        self.publish_shutdown_stop()
+        self.shutting_down = True
         if self.gamepad_available:
             pygame.joystick.quit()
             pygame.quit()
-        self.ros_node.destroy_node()
+        try:
+            self.ros_node.destroy_node()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.shutdown()
         event.accept()
 
 
@@ -681,8 +857,13 @@ def main():
     application = QApplication(sys.argv)
     application.setFont(QFont("DejaVu Sans", 10))
     window = VoltControlWindow()
+    signal.signal(signal.SIGINT, lambda *_args: window.close())
     window.show()
-    exit_code = application.exec_()
+    try:
+        exit_code = application.exec_()
+    except KeyboardInterrupt:
+        window.close()
+        exit_code = 130
     if rclpy.ok():
         rclpy.shutdown()
     sys.exit(exit_code)

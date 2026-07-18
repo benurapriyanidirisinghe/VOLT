@@ -1,0 +1,24 @@
+name: look_left
+description: Small whole-body lean suggesting a left look without leaving stance.
+joint_names:
+  - front_left_shoulder
+  - front_left_leg
+  - front_left_foot
+  - front_right_shoulder
+  - front_right_leg
+  - front_right_foot
+  - rear_left_shoulder
+  - rear_left_leg
+  - rear_left_foot
+  - rear_right_shoulder
+  - rear_right_leg
+  - rear_right_foot
+points:
+  - time_from_start: 0.0
+    positions: [0.0496, 0.4992, -1.0812, -0.0496, 0.4992, -1.0812, 0.0496, 0.6956, -1.0812, -0.0496, 0.6956, -1.0812]
+  - time_from_start: 0.8
+    positions: [0.18, 0.54, -1.1, 0.06, 0.46, -1.04, 0.18, 0.74, -1.1, 0.06, 0.66, -1.04]
+  - time_from_start: 1.4
+    positions: [0.18, 0.54, -1.1, 0.06, 0.46, -1.04, 0.18, 0.74, -1.1, 0.06, 0.66, -1.04]
+  - time_from_start: 2.2
+    positions: [0.0496, 0.4992, -1.0812, -0.0496, 0.4992, -1.0812, 0.0496, 0.6956, -1.0812, -0.0496, 0.6956, -1.0812]
