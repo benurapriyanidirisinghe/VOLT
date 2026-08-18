@@ -321,7 +321,7 @@ class GuiLayoutTests(unittest.TestCase):
         self.assertEqual(window.pushup_travel_mm.singleStep(), 1.0)
         self.assertIs(containing_tab(window.face_status), window.main_tabs.widget(1))
         self.assertIs(
-            containing_tab(window.apply_fast_trot_button),
+            containing_tab(window.apply_real_profile_button),
             window.main_tabs.widget(2),
         )
         self.assertIs(

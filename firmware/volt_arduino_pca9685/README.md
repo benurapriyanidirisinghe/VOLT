@@ -313,26 +313,28 @@ configuration so the GUI and emote mapping can select it. Keep animations in
 `updateFaceLeds()` non-blocking; do not add animation loops or `delay()` calls.
 
 The current repository firmware source sets `MAX_DEG_PER_SECOND` to
-`120.0f`. That ceiling has not been validated on the physical robot and must
-not be raised. The ROS host keeps default and non-fast motion capped at
-30 deg/s. The physical `fast_trot` path has a separate 110 deg/s host cap,
-which remains below the firmware ceiling.
+`240.0`. It is a fault ceiling, not a shaping filter: it sits well clear of
+normal motion (and inside the TD-8130MG's ~375 deg/s rating) so it catches
+only genuine faults. It has not been validated on the physical robot and must
+not be raised. The ROS host stays far below it: the gait engine validates
+every gait configuration at load against commanded budgets of 80 deg/s on
+loaded stance joints and 190 deg/s on the unloaded swing leg.
 
-If the Nano still runs an older image with a 30 deg/s firmware ceiling, reflash
-this current firmware before trying the new physical fast-trot profile. If the
-Nano already runs the 120 deg/s image, host-side Python or tuning changes alone
-do not require another upload. Servo calibration values are unchanged by this
-profile. The firmware remains the final safety guard, and calibration tools can
-bypass the gait host cap, so use them cautiously.
+If the Nano still runs an older image with a lower slew ceiling, reflash this
+current firmware before live walking. If the Nano already runs the current
+image, host-side Python or tuning changes alone do not require another
+upload. Servo calibration values are unchanged by this ceiling. The firmware
+remains the final safety guard, and calibration tools can bypass the gait
+host budgets, so use them cautiously.
 
 The ROS bridge clamps `max_send_rate` to at most 30 Hz and schedules frames
 against the next ideal deadline, so a 100 Hz source produces 30 Hz rather than
 aliasing down to 25 Hz. The firmware updates the 50 Hz PCA9685 output over
 400 kHz I2C and skips channels whose commanded angle has stopped changing.
 
-See the
-[fast-trot safety and tuning guide](../../src/volt_description/FAST_TROT.md)
-before attempting physical fast-trot operation.
+See the physical test procedure in
+[PHYSICAL_TESTS.md](../../src/volt_description/PHYSICAL_TESTS.md) before
+attempting physical walking.
 
 Start with the robot suspended or with legs off the ground.
 

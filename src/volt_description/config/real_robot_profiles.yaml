@@ -2,36 +2,37 @@ version: 1
 
 # Canonical SI units except fields explicitly suffixed with _deg.  These are
 # trajectory/conditioning values only; servo calibration remains in
-# servo_calibration.yaml.
+# servo_calibration.yaml.  Every profile's gait overlay must re-pass the
+# gait engine's servo-budget sweep when applied, so a profile cannot demand
+# joint speeds the TD-8130MG cannot deliver under load.
 profiles:
   SIMULATION:
-    gait: spotmicro_video_walk
-    cycle_duration: 5.20
-    stride_length: 0.035
-    lateral_stride_width: 0.015
-    step_height: 0.028
-    duty_factor: 0.80
+    gait: trot
+    cycle_duration: 1.10
+    stride_length: 0.070
+    lateral_stride_width: 0.020
+    step_height: 0.024
+    duty_factor: 0.58
     body_height: 0.200
     body_x: 0.0
     body_y: 0.0
     body_roll_deg: 0.0
     body_pitch_deg: 0.0
     body_yaw_deg: 0.0
-    max_joint_velocity_deg_s: 114.0
-    max_joint_acceleration_deg_s2: 1200.0
+    max_joint_velocity_deg_s: 190.0
+    max_joint_acceleration_deg_s2: 6000.0
     smoothing_amount: 0.0
     touchdown_softness: 0.18
     stance_width: 0.104
 
-  # First loaded-floor profile: one leg at a time, small stride, 40 mm toe
-  # clearance, and bounded servo dynamics. Command-path lag can extend the
-  # nominal 2.0 s cycle whenever filtered commands have not settled.
+  # First loaded-floor profile: lateral-sequence amble, one leg at a time,
+  # three feet always planted, small stride, bounded servo dynamics.
   REAL_DIAGNOSTIC:
-    gait: diagnostic_crawl
-    cycle_duration: 2.00
-    stride_length: 0.035
+    gait: amble
+    cycle_duration: 2.40
+    stride_length: 0.030
     lateral_stride_width: 0.010
-    step_height: 0.040
+    step_height: 0.022
     duty_factor: 0.80
     body_height: 0.200
     body_x: 0.0
@@ -40,45 +41,45 @@ profiles:
     body_pitch_deg: 0.0
     body_yaw_deg: 0.0
     max_joint_velocity_deg_s: 100.0
-    max_joint_acceleration_deg_s2: 240.0
+    max_joint_acceleration_deg_s2: 2400.0
     smoothing_amount: 0.15
     touchdown_softness: 0.30
     stance_width: 0.104
 
   REAL_SAFE:
-    gait: real_safe_trot
+    gait: trot
     cycle_duration: 1.20
-    stride_length: 0.035
+    stride_length: 0.045
     lateral_stride_width: 0.008
-    step_height: 0.036
-    duty_factor: 0.65
+    step_height: 0.024
+    duty_factor: 0.62
     body_height: 0.195
     body_x: -0.004
     body_y: 0.0
     body_roll_deg: 0.0
     body_pitch_deg: 1.0
     body_yaw_deg: 0.0
-    max_joint_velocity_deg_s: 110.0
-    max_joint_acceleration_deg_s2: 360.0
+    max_joint_velocity_deg_s: 150.0
+    max_joint_acceleration_deg_s2: 3600.0
     smoothing_amount: 0.12
     touchdown_softness: 0.28
     stance_width: 0.104
 
   REAL_NORMAL:
-    gait: real_safe_trot
-    cycle_duration: 0.90
-    stride_length: 0.050
+    gait: trot
+    cycle_duration: 1.05
+    stride_length: 0.055
     lateral_stride_width: 0.012
-    step_height: 0.038
-    duty_factor: 0.60
+    step_height: 0.024
+    duty_factor: 0.58
     body_height: 0.195
     body_x: -0.003
     body_y: 0.0
     body_roll_deg: 0.0
     body_pitch_deg: 1.0
     body_yaw_deg: 0.0
-    max_joint_velocity_deg_s: 120.0
-    max_joint_acceleration_deg_s2: 520.0
-    smoothing_amount: 0.08
-    touchdown_softness: 0.22
+    max_joint_velocity_deg_s: 175.0
+    max_joint_acceleration_deg_s2: 4800.0
+    smoothing_amount: 0.10
+    touchdown_softness: 0.24
     stance_width: 0.104

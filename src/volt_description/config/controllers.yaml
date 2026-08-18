@@ -62,6 +62,10 @@ joint_trajectory_controller:
 
 gz_ros2_control:
   ros__parameters:
-    # Position commands are applied as a first-order joint velocity target.
-    # Keep this aligned with the installed Humble/Fortress plugin default.
-    position_proportional_gain: 0.1
+    # Position commands are applied as a first-order joint velocity target
+    # (vel = gain * position_error).  The old 0.1 gain was so soft that
+    # tracking lag was gain-dominated and load-independent; 18.0 makes the
+    # URDF effort clamp the binding constraint, so a loaded joint genuinely
+    # slows down.  Equivalent first-order servo time constant ~55 ms, and a
+    # joint tracking 190 deg/s carries ~10 deg of realistic following error.
+    position_proportional_gain: 18.0

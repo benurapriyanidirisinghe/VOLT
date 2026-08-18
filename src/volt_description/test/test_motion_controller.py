@@ -160,8 +160,8 @@ def make_controller(gait_controller=None):
         name: dict(config)
         for name, config in GAITS.items()
     }
-    controller.gait_name = "spot_walk"
-    controller.requested_gait = "spot_walk"
+    controller.gait_name = "amble"
+    controller.requested_gait = "amble"
     controller.pending_gait = None
     controller.gait_controller = gait_controller or FakeGaitController()
     controller.motion_active = False
@@ -223,23 +223,20 @@ def enable_physical_test_controller(controller):
 
 
 class GaitRequestTests(unittest.TestCase):
-    def test_walk_alias_request_activates_canonical_video_walk(self):
+    def test_walk_alias_request_activates_canonical_amble(self):
         controller = make_controller()
-        controller.gait_name = "legacy_walk"
-        controller.requested_gait = "legacy_walk"
+        controller.gait_name = "trot"
+        controller.requested_gait = "trot"
         controller.velocity_command_sequence = 7
 
         controller.gait_callback(SimpleNamespace(data="  WALK  "))
 
-        self.assertEqual(
-            controller.requested_gait,
-            "spotmicro_video_walk",
-        )
-        self.assertEqual(controller.gait_name, "spotmicro_video_walk")
+        self.assertEqual(controller.requested_gait, "amble")
+        self.assertEqual(controller.gait_name, "amble")
         self.assertIsNone(controller.pending_gait)
         self.assertEqual(
             controller.gait_controller.set_gait_calls,
-            [("spotmicro_video_walk", 10.0)],
+            [("amble", 10.0)],
         )
         self.assertEqual(controller.resume_after_velocity_sequence, 7)
         self.assertEqual(
@@ -255,91 +252,54 @@ class GaitRequestTests(unittest.TestCase):
         controller = make_controller(gait)
         controller.step_in_place = True
 
-        controller.gait_callback(SimpleNamespace(data="slow_trot"))
+        controller.gait_callback(SimpleNamespace(data="trot"))
 
-        self.assertEqual(controller.requested_gait, "slow_trot")
-        self.assertEqual(controller.gait_name, "spot_walk")
-        self.assertEqual(controller.pending_gait, "slow_trot")
+        self.assertEqual(controller.requested_gait, "trot")
+        self.assertEqual(controller.gait_name, "amble")
+        self.assertEqual(controller.pending_gait, "trot")
         self.assertEqual(gait.stop_requests, 1)
         self.assertEqual(gait.set_gait_calls, [])
         self.assertFalse(controller.step_in_place)
 
-    def test_video_walk_request_is_deferred_while_trot_leg_is_airborne(self):
+    def test_amble_request_is_deferred_while_trot_leg_is_airborne(self):
         gait = FakeGaitController(
             active=True,
             swing_legs=["front_left", "rear_right"],
         )
         controller = make_controller(gait)
-        controller.gait_name = "normal_trot"
-        controller.requested_gait = "normal_trot"
+        controller.gait_name = "trot"
+        controller.requested_gait = "trot"
 
-        controller.gait_callback(
-            SimpleNamespace(data="spotmicro_video_walk")
-        )
+        controller.gait_callback(SimpleNamespace(data="amble"))
 
-        self.assertEqual(
-            controller.requested_gait,
-            "spotmicro_video_walk",
-        )
-        self.assertEqual(controller.gait_name, "normal_trot")
-        self.assertEqual(
-            controller.pending_gait,
-            "spotmicro_video_walk",
-        )
+        self.assertEqual(controller.requested_gait, "amble")
+        self.assertEqual(controller.gait_name, "trot")
+        self.assertEqual(controller.pending_gait, "amble")
         self.assertEqual(gait.stop_requests, 1)
         self.assertEqual(gait.set_gait_calls, [])
 
-    def test_spot_walk_attitude_is_bounded_before_fresh_motion(self):
+    def test_attitude_is_bounded_before_fresh_motion(self):
         controller = make_controller()
-        controller.gait_name = "normal_trot"
-        controller.requested_gait = "normal_trot"
-        controller.body_roll = 0.15
-        controller.body_pitch = -0.15
+        controller.gait_name = "trot"
+        controller.requested_gait = "trot"
+        controller.body_roll = 0.30
+        controller.body_pitch = -0.30
 
-        controller.select_gait("spot_walk", 10.0)
+        controller.select_gait("amble", 10.0)
 
-        limit_roll = controller.gait_configs["spot_walk"][
-            "maximum_body_roll"
-        ]
-        limit_pitch = controller.gait_configs["spot_walk"][
-            "maximum_body_pitch"
-        ]
-        self.assertAlmostEqual(controller.body_roll, limit_roll)
-        self.assertAlmostEqual(controller.body_pitch, -limit_pitch)
+        # No per-gait attitude override exists any more; the shared 0.16 rad
+        # default bounds pre-existing attitude before fresh motion starts.
+        self.assertAlmostEqual(controller.body_roll, 0.16)
+        self.assertAlmostEqual(controller.body_pitch, -0.16)
         self.assertEqual(
             controller.velocity_gate_state,
             VELOCITY_GATE_AWAIT_NEUTRAL,
         )
 
-    def test_fast_trot_selection_resets_unvalidated_manual_body_pose(self):
-        controller = make_controller()
-        controller.gait_name = "normal_trot"
-        controller.requested_gait = "normal_trot"
-        controller.body_height = 0.220
-        controller.body_x = -0.025
-        controller.body_y = 0.020
-        controller.body_roll = -0.060
-        controller.body_pitch = -0.080
-        controller.body_yaw = 0.180
-
-        controller.select_gait("fast_trot", 10.0)
-
-        self.assertEqual(controller.body_height, controller.neutral_body_height)
-        self.assertEqual(
-            (
-                controller.body_x,
-                controller.body_y,
-                controller.body_roll,
-                controller.body_pitch,
-                controller.body_yaw,
-            ),
-            (0.0, 0.0, 0.0, 0.0, 0.0),
-        )
-
     def test_held_nonzero_traffic_cannot_resume_after_immediate_switch(self):
         controller = make_controller()
 
-        controller.gait_callback(SimpleNamespace(data="slow_trot"))
+        controller.gait_callback(SimpleNamespace(data="trot"))
         for _ in range(5):
             controller.velocity_callback(make_twist(x=0.02))
 
@@ -368,13 +328,13 @@ class GaitRequestTests(unittest.TestCase):
         controller.filtered_velocity = [0.015, -0.005, 0.08]
         controller.velocity_command_sequence = 9
 
-        controller.gait_callback(SimpleNamespace(data="slow_trot"))
-        self.assertEqual(controller.pending_gait, "slow_trot")
+        controller.gait_callback(SimpleNamespace(data="trot"))
+        self.assertEqual(controller.pending_gait, "trot")
 
-        controller.gait_callback(SimpleNamespace(data="spot_walk"))
+        controller.gait_callback(SimpleNamespace(data="amble"))
 
         self.assertIsNone(controller.pending_gait)
-        self.assertEqual(controller.requested_gait, "spot_walk")
+        self.assertEqual(controller.requested_gait, "amble")
         self.assertEqual(controller.requested_velocity, [0.0, 0.0, 0.0])
         self.assertEqual(controller.filtered_velocity, [0.0, 0.0, 0.0])
         self.assertEqual(
@@ -392,7 +352,7 @@ class VelocitySafetyTests(unittest.TestCase):
 
     def test_pending_gait_ramps_filtered_velocity_toward_zero(self):
         controller = make_controller()
-        controller.pending_gait = "slow_trot"
+        controller.pending_gait = "trot"
         controller.requested_velocity = [0.004, 0.001, 0.05]
         controller.filtered_velocity = [0.004, 0.001, 0.05]
         controller.velocity_command_sequence = 5
@@ -405,10 +365,10 @@ class VelocitySafetyTests(unittest.TestCase):
             controller.filtered_velocity,
         )
 
-    def test_hardware_scaled_low_spot_velocity_is_classified_as_motion(self):
+    def test_hardware_scaled_low_velocity_is_classified_as_motion(self):
         controller = make_controller()
         controller.hardware_mode = True
-        config = controller.gait_configs["spot_walk"]
+        config = controller.gait_configs["amble"]
         controller.filtered_velocity = [
             config["max_x"]
             * config["hardware_speed_scale"]
@@ -490,16 +450,16 @@ class SafeGaitSwitchTests(unittest.TestCase):
             swing_legs=["rear_right"],
         )
         controller = make_controller(gait)
-        controller.pending_gait = "slow_trot"
-        controller.requested_gait = "slow_trot"
+        controller.pending_gait = "trot"
+        controller.requested_gait = "trot"
         controller.velocity_command_sequence = 11
         controller.filtered_velocity = [0.003, 0.0, 0.0]
         self.prepare_control_callback(controller)
 
         controller.control_callback()
 
-        self.assertEqual(controller.gait_name, "spot_walk")
-        self.assertEqual(controller.pending_gait, "slow_trot")
+        self.assertEqual(controller.gait_name, "amble")
+        self.assertEqual(controller.pending_gait, "trot")
         self.assertEqual(gait.set_gait_calls, [])
 
         # The gait controller's safety contract keeps active true until the
@@ -508,9 +468,9 @@ class SafeGaitSwitchTests(unittest.TestCase):
         gait.swing_legs = []
         controller.control_callback()
 
-        self.assertEqual(controller.gait_name, "slow_trot")
+        self.assertEqual(controller.gait_name, "trot")
         self.assertIsNone(controller.pending_gait)
-        self.assertEqual(gait.set_gait_calls, [("slow_trot", 10.0)])
+        self.assertEqual(gait.set_gait_calls, [("trot", 10.0)])
         self.assertEqual(controller.filtered_velocity, [0.0, 0.0, 0.0])
         self.assertEqual(controller.resume_after_velocity_sequence, 11)
         self.assertEqual(
@@ -579,7 +539,7 @@ class CommandOwnershipTests(unittest.TestCase):
         controller.filtered_velocity = [0.01, 0.005, 0.05]
         controller.step_in_place = True
         controller.motion_active = True
-        controller.pending_gait = "slow_trot"
+        controller.pending_gait = "trot"
         controller.requested_gait = "slow_trot"
         controller.pending_pose_action = "sit"
         controller.transition = {"start_time": 9.0}
@@ -604,7 +564,7 @@ class CommandOwnershipTests(unittest.TestCase):
         self.assertIsNone(controller.pending_gait)
         self.assertIsNone(controller.pending_pose_action)
         self.assertIsNone(controller.transition)
-        self.assertEqual(controller.requested_gait, "spot_walk")
+        self.assertEqual(controller.requested_gait, "amble")
         self.assertEqual(controller.state, "hold")
         self.assertFalse(gait.active)
         self.assertEqual(len(gait.hold_calls), 1)
@@ -686,57 +646,19 @@ class CommandOwnershipTests(unittest.TestCase):
         self.assertEqual(controller.body_x, 0.01)
         self.assertEqual(controller.body_height, 0.2)
 
-    def test_spot_walk_body_pose_uses_shared_configured_attitude_limits(self):
+    def test_body_pose_uses_shared_attitude_limits(self):
         controller = make_controller()
 
         controller.body_pose_callback(
             SimpleNamespace(
                 linear=SimpleNamespace(x=0.0, y=0.0, z=0.2),
-                angular=SimpleNamespace(x=0.15, y=-0.15, z=0.0),
+                angular=SimpleNamespace(x=0.30, y=-0.30, z=0.0),
             )
         )
 
-        config = controller.gait_configs["spot_walk"]
-        self.assertAlmostEqual(
-            controller.body_roll,
-            config["maximum_body_roll"],
-        )
-        self.assertAlmostEqual(
-            controller.body_pitch,
-            -config["maximum_body_pitch"],
-        )
-
-    def test_fast_trot_rejects_external_body_pose_commands(self):
-        controller = make_controller()
-        controller.gait_name = "fast_trot"
-
-        controller.body_pose_callback(
-            SimpleNamespace(
-                linear=SimpleNamespace(x=-0.025, y=0.020, z=0.220),
-                angular=SimpleNamespace(x=-0.060, y=-0.080, z=0.180),
-            )
-        )
-
-        self.assertEqual(controller.body_height, controller.neutral_body_height)
-        self.assertEqual(
-            (
-                controller.body_x,
-                controller.body_y,
-                controller.body_roll,
-                controller.body_pitch,
-                controller.body_yaw,
-            ),
-            (0.0, 0.0, 0.0, 0.0, 0.0),
-        )
-        self.assertIn("owns body posture", controller.warning)
-
-        controller.body_pose_callback(
-            SimpleNamespace(
-                linear=SimpleNamespace(x=0.0, y=0.0, z=0.2),
-                angular=SimpleNamespace(x=0.0, y=0.0, z=0.0),
-            )
-        )
-        self.assertEqual(controller.warning, "")
+        # Attitude is bounded by the shared 0.16 rad ceiling.
+        self.assertAlmostEqual(controller.body_roll, 0.16)
+        self.assertAlmostEqual(controller.body_pitch, -0.16)
 
 
 class PoseTransitionSafetyTests(unittest.TestCase):
@@ -760,15 +682,15 @@ class PoseTransitionSafetyTests(unittest.TestCase):
         controller.commanded_velocities = [0.0] * len(JOINT_NAMES)
         controller.state = "standing"
         controller.step_in_place = True
-        controller.pending_gait = "fast_trot"
-        controller.requested_gait = "fast_trot"
+        controller.pending_gait = "trot"
+        controller.requested_gait = "trot"
         self.install_parameters(controller)
 
         controller.start_sit_transition()
 
         self.assertEqual(controller.pending_pose_action, "sit")
         self.assertIsNone(controller.pending_gait)
-        self.assertEqual(controller.requested_gait, "spot_walk")
+        self.assertEqual(controller.requested_gait, "amble")
         self.assertIsNone(controller.transition)
         self.assertFalse(controller.step_in_place)
         self.assertEqual(gait.stop_requests, 1)
@@ -890,7 +812,7 @@ class PoseTransitionSafetyTests(unittest.TestCase):
         controller.start_sit_transition()
 
         controller.gait_callback(SimpleNamespace(data="slow_trot"))
-        self.assertEqual(controller.requested_gait, "spot_walk")
+        self.assertEqual(controller.requested_gait, "amble")
         controller.body_pose_callback(
             SimpleNamespace(
                 linear=SimpleNamespace(x=0.01, y=0.0, z=0.2),
@@ -996,12 +918,12 @@ class PoseTransitionSafetyTests(unittest.TestCase):
 
 
 class OpenLoopHardwareTests(unittest.TestCase):
-    def test_fast_trot_jump_warning_requires_consecutive_active_gait_samples(self):
+    def test_jump_warning_requires_consecutive_active_gait_samples(self):
         controller = make_controller(FakeGaitController(active=False))
-        controller.gait_name = "fast_trot"
+        controller.gait_name = "trot"
         controller.commanded_positions = [0.0] * len(JOINT_NAMES)
         controller.sudden_joint_jump_deg = 10.0
-        controller.last_fast_trot_raw_joint_target = [
+        controller.last_gait_raw_joint_target = [
             0.0 for _ in JOINT_NAMES
         ]
         emote_like_target = [0.0] * len(JOINT_NAMES)
@@ -1013,11 +935,11 @@ class OpenLoopHardwareTests(unittest.TestCase):
         )
 
         self.assertEqual(controller.maximum_raw_joint_jump_deg, 0.0)
-        self.assertEqual(controller.last_fast_trot_raw_joint_target, [])
+        self.assertEqual(controller.last_gait_raw_joint_target, [])
         self.assertEqual(controller.logger.warnings, [])
 
         # The first genuinely active sample establishes a source-local
-        # baseline; only a later active fast-trot sample may raise the warning.
+        # baseline; only a later active gait sample may raise the warning.
         controller.gait_controller.active = True
         controller.record_joint_command_deltas(
             emote_like_target,
@@ -1034,88 +956,23 @@ class OpenLoopHardwareTests(unittest.TestCase):
         )
         self.assertAlmostEqual(controller.maximum_raw_joint_jump_deg, 20.0)
         self.assertEqual(len(controller.logger.warnings), 1)
-        self.assertIn("FAST TROT raw joint target", controller.logger.warnings[0])
+        self.assertIn("raw joint target", controller.logger.warnings[0])
 
-    def test_fast_trot_restart_discards_partial_previous_cycle_metrics(self):
-        gait = FakeGaitController(active=False)
-        controller = make_controller(gait)
-        controller.gait_name = "fast_trot"
-        controller.reset_fast_trot_cycle_diagnostics()
-        controller.fast_trot_diagnostic_active = True
-        controller.fast_trot_completed_cycles = 3
-        controller.fast_trot_stance_completion_pending = {"front_left"}
-        controller.last_gait_body_transform = {
-            "height": 0.2,
-            "body_x": 0.0,
-            "body_y": 0.0,
-            "roll": 0.0,
-            "pitch": 0.0,
-            "yaw": 0.0,
-        }
-
-        controller.update_fast_trot_cycle_diagnostics(
-            WALK_POSE,
-            WALK_POSE,
-        )
-        self.assertFalse(controller.fast_trot_diagnostic_active)
-
-        gait.active = True
-        controller.update_fast_trot_cycle_diagnostics(
-            WALK_POSE,
-            WALK_POSE,
-        )
-        self.assertTrue(controller.fast_trot_diagnostic_active)
-        self.assertEqual(controller.fast_trot_completed_cycles, 0)
-        self.assertEqual(
-            controller.fast_trot_stance_completion_pending,
-            set(),
-        )
-
-    def test_hardware_profile_never_exceeds_first_test_joint_rate(self):
+    def test_joint_velocity_cap_comes_from_the_gait_config(self):
         controller = make_controller()
         controller.max_joint_velocity = 4.0
         controller.hardware_mode = True
+        cap = math.radians(
+            controller.gait_configs["amble"]["joint_velocity_limit_deg_s"]
+        )
         for index in range(len(JOINT_NAMES)):
             self.assertLessEqual(
                 controller.joint_velocity_limit(index),
-                HARDWARE_JOINT_VELOCITY_LIMIT,
+                cap + 1e-9,
             )
-
-        controller.hardware_mode = False
-        self.assertEqual(
-            controller.joint_velocity_limit(2),
-            SIMULATION_JOINT_VELOCITY_LIMIT,
-        )
-
-    def test_fast_trot_uses_fixed_validated_acceleration_for_every_preset(self):
-        controller = make_controller()
-        controller.gait_name = "fast_trot"
-        controller.gait_configs = {
-            name: dict(config)
-            for name, config in GAITS.items()
-        }
-        controller.hardware_mode = True
-        controller.max_joint_acceleration = 60.0
-        controller.gait_controller = SimpleNamespace(
-            fast_trot_tuning=dict(
-                GAITS["fast_trot"]["presets"]["bench"]
-            )
-        )
-
-        expected = {
-            name: GAITS["fast_trot"]["joint_acceleration_limit"]
-            for name in ("bench", "floor_test", "wide")
-        }
-        observed = []
-        for name, acceleration in expected.items():
-            controller.gait_controller.fast_trot_tuning = dict(
-                GAITS["fast_trot"]["presets"][name]
-            )
-            actual = controller.joint_acceleration_limit(0)
-            observed.append(actual)
-            self.assertAlmostEqual(actual, acceleration, places=12)
-            self.assertLessEqual(actual, controller.max_joint_acceleration)
-        self.assertEqual(len(set(observed)), 1)
+        # The knee's kinematic limit (4.5 rad/s) exceeds the gait cap, so the
+        # gait cap must be the binding constraint there.
+        self.assertAlmostEqual(controller.joint_velocity_limit(2), cap)
 
     def test_open_loop_startup_state_is_firmware_safe_walk_pose(self):
         state, positions, velocities, warning = initial_motion_state(True)
@@ -1414,9 +1271,9 @@ class StatusSchemaTests(unittest.TestCase):
         controller = make_controller(gait)
         controller.last_status_time = 0.0
         controller.state = "standing"
-        controller.gait_name = "spotmicro_video_walk"
-        controller.requested_gait = "slow_trot"
-        controller.pending_gait = "slow_trot"
+        controller.gait_name = "amble"
+        controller.requested_gait = "trot"
+        controller.pending_gait = "trot"
         controller.motion_active = True
         controller.step_in_place = False
         controller.projected_targets = ["front_left"]
@@ -1429,7 +1286,7 @@ class StatusSchemaTests(unittest.TestCase):
         )
         controller.status_publisher = RecordingPublisher()
         controller.effective_gait_limits = lambda: {
-            "spotmicro_video_walk": {
+            "amble": {
                 "max_x": 0.01,
                 "max_y": 0.005,
                 "max_yaw": 0.18,
@@ -1487,20 +1344,7 @@ class StatusSchemaTests(unittest.TestCase):
             "speed_scale",
             "hardware_mode",
             "open_loop_hardware",
-            "requested_stride",
-            "achieved_stride",
-            "signed_stride",
-            "stride_metric_valid",
-            "stride_metric",
-            "stance_grounded",
-            "stance_max_ground_error",
-            "stance_ground_tolerance",
-            "requested_step_height",
-            "achieved_step_height",
-            "configured_cycle_period",
-            "current_cycle_period",
-            "phase_rate_scale",
-            "phase_transition_hold",
+            "cycle_period",
             "joint_velocity_clamp_count",
             "joint_braking_clamp_count",
             "joint_acceleration_clamp_count",
@@ -1511,12 +1355,9 @@ class StatusSchemaTests(unittest.TestCase):
             "tracking_feedback_age",
         }
         self.assertTrue(required_fields.issubset(status))
-        self.assertEqual(status["requested_gait"], "slow_trot")
-        self.assertEqual(
-            status["active_gait"],
-            "spotmicro_video_walk",
-        )
-        self.assertEqual(status["pending_gait"], "slow_trot")
+        self.assertEqual(status["requested_gait"], "trot")
+        self.assertEqual(status["active_gait"], "amble")
+        self.assertEqual(status["pending_gait"], "trot")
         self.assertEqual(status["swing_legs"], ["rear_right"])
         self.assertEqual(status["projected_targets"], ["front_left"])
         self.assertEqual(status["clamped_joints"], ["rear_right_foot"])

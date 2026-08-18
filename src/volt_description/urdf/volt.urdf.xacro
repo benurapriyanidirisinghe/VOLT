@@ -19,17 +19,22 @@
 
   <!-- Params -->
 
-  <!-- Keep the proven simulation profile as default.  The opt-in hardware
-       profile matches the production firmware's 120 deg/s channel slew and
-       uses a less idealized effort/damping envelope without changing ROS/IK
-       joint limits or physical calibration. -->
+  <!-- Keep the proven simulation profile as default.  The opt-in td8130mg
+       profile models the physical servo under load: velocity capped at the
+       firmware's 240 deg/s slew ceiling (4.1888 rad/s; the servo free speed
+       is ~375 deg/s so firmware is the binding limit), effort capped at a
+       derated 2.8 N.m stall torque (TD-8130MG ~30 kg.cm at 6 V).  With the
+       stiffer tracking gain in ros2_control.xacro the effort clamp - not an
+       artificially soft gain - becomes what slows a loaded joint, so Gazebo
+       reproduces load-dependent tracking lag.  ROS/IK joint limits and
+       physical calibration are unchanged. -->
   <xacro:property name="hardware_actuators" value="${'$(arg actuator_profile)' == 'td8130mg'}"/>
-  <xacro:property name="shoulder_velocity" value="${2.0}"/>
-  <xacro:property name="leg_velocity" value="${2.0944 if hardware_actuators else 3.0}"/>
-  <xacro:property name="foot_velocity" value="${2.0944 if hardware_actuators else 4.5}"/>
-  <xacro:property name="joint_effort" value="${6.0 if hardware_actuators else 20.0}"/>
-  <xacro:property name="joint_damping" value="${0.9 if hardware_actuators else 0.6}"/>
-  <xacro:property name="joint_friction" value="${0.15 if hardware_actuators else 0.1}"/>
+  <xacro:property name="shoulder_velocity" value="${4.1888 if hardware_actuators else 2.0}"/>
+  <xacro:property name="leg_velocity" value="${4.1888 if hardware_actuators else 3.0}"/>
+  <xacro:property name="foot_velocity" value="${4.1888 if hardware_actuators else 4.5}"/>
+  <xacro:property name="joint_effort" value="${2.8 if hardware_actuators else 20.0}"/>
+  <xacro:property name="joint_damping" value="${0.35 if hardware_actuators else 0.6}"/>
+  <xacro:property name="joint_friction" value="${0.10 if hardware_actuators else 0.1}"/>
 
   <xacro:property name="body_length" value="0.140" />
   <xacro:property name="body_width" value="0.110" />

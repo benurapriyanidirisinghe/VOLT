@@ -15,15 +15,15 @@ Suspend the robot before every physical calibration or first-motion test. Keep
 the servo-power disconnect within reach, and never power the servos from the
 Arduino.
 
-The current firmware source uses `MAX_DEG_PER_SECOND = 120.0`; that ceiling has
-not been physically validated. Default and non-fast hardware gaits remain
-host-limited to 30 deg/s. The physical `fast_trot` profile alone is
-host-limited to 110 deg/s beneath the firmware ceiling. If the Nano still
-contains the older 30 deg/s firmware image, reflash the current source before
-using the new fast trot. If it already contains the 120 deg/s image, Python or
-host-side gait changes do not by themselves require another upload. Do not
-raise the firmware ceiling. Follow the raised BENCH sequence in
-[FAST_TROT.md](FAST_TROT.md).
+The current firmware source uses `MAX_DEG_PER_SECOND = 240.0` as a fault
+ceiling, not a shaping filter; it has not been physically validated. The gait
+engine keeps commanded joint speeds well below it by validating every gait
+configuration at load against its servo budgets: 80 deg/s on loaded stance
+joints and 190 deg/s on the unloaded swing leg. If the Nano still contains an
+older low-slew firmware image, reflash the current source before live
+walking. If it already contains the current image, Python or host-side gait
+changes do not by themselves require another upload. Do not raise the
+firmware ceiling.
 
 The hardware-only open-loop seed and firmware safe-start frame both represent
 the calibrated standing pose. Before first PWM/ARM, support the robot and
@@ -45,7 +45,7 @@ Use this exact process:
 8. Confirm all 12 channel mappings.
 9. Confirm every joint direction individually.
 10. Confirm right-side inversion occurs only in calibration.
-11. Select `spotmicro_video_walk`.
+11. Select `AMBLE`.
 12. Set speed to 10–20%.
 13. Enable command owner `MOTION`.
 14. Test step-in-place in dry-run.
@@ -56,12 +56,11 @@ Use this exact process:
 19. Send HOLD.
 20. Lower the robot only after all movements are verified.
 
-This general calibration checklist does not authorize fast-trot floor testing.
-For `fast_trot`, keep the robot raised, apply BENCH only while stopped, and
-complete the BENCH → FLOOR TEST → WIDE escalation in
-[FAST_TROT.md](FAST_TROT.md). No fast-trot stride change requires a neutral,
-trim, direction, channel, or physical-limit change in
-`config/servo_calibration.yaml`.
+This general calibration checklist does not authorize floor testing. Keep
+the robot raised and follow the `REAL_DIAGNOSTIC` then `REAL_SAFE` gait
+progression in [PHYSICAL_TESTS.md](PHYSICAL_TESTS.md). No gait or profile
+change requires a neutral, trim, direction, channel, or physical-limit change
+in `config/servo_calibration.yaml`.
 
 ## Canonical pipeline and order
 

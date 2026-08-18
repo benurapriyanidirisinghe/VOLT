@@ -28,19 +28,12 @@ def generate_launch_description():
     joint_rate_diagnostic_output = LaunchConfiguration(
         "joint_rate_diagnostic_output"
     )
-    physical_fast_trot_config_file = LaunchConfiguration(
-        "physical_fast_trot_config_file"
-    )
     real_robot_profiles_file = LaunchConfiguration("real_robot_profiles_file")
     emote_config_file = LaunchConfiguration("emote_config_file")
     enable_physical_tests = LaunchConfiguration("enable_physical_tests")
     use_sim_time = LaunchConfiguration("use_sim_time")
     actuator_profile = LaunchConfiguration("actuator_profile")
     hardware_enabled = LaunchConfiguration("hardware_enabled")
-    fast_trot_diagnostic = LaunchConfiguration("fast_trot_diagnostic")
-    fast_trot_diagnostic_output = LaunchConfiguration(
-        "fast_trot_diagnostic_output"
-    )
     effective_hardware_enabled = PythonExpression([
         "'true' if ('",
         use_hardware,
@@ -78,11 +71,6 @@ def generate_launch_description():
             "use_sim_time": use_sim_time,
             "hardware_mode": effective_hardware_enabled,
             "open_loop_hardware": effective_hardware_enabled,
-            "fast_trot_diagnostic": fast_trot_diagnostic,
-            "fast_trot_diagnostic_output": fast_trot_diagnostic_output,
-            "physical_fast_trot_config_file": (
-                physical_fast_trot_config_file
-            ),
             "real_robot_profiles_file": real_robot_profiles_file,
             "emote_config_file": emote_config_file,
             "enable_physical_tests": enable_physical_tests,
@@ -191,17 +179,6 @@ def generate_launch_description():
             description="Servo calibration YAML file",
         ),
         DeclareLaunchArgument(
-            "physical_fast_trot_config_file",
-            default_value=PathJoinSubstitution([
-                pkg_share,
-                "config",
-                "physical_fast_trot.yaml",
-            ]),
-            description=(
-                "Dedicated physical fast-trot YAML used only for hardware mode"
-            ),
-        ),
-        DeclareLaunchArgument(
             "real_robot_profiles_file",
             default_value=PathJoinSubstitution([
                 pkg_share,
@@ -236,16 +213,6 @@ def generate_launch_description():
             default_value="simulation",
             choices=["simulation", "td8130mg"],
             description="Gazebo actuator-limit profile",
-        ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic",
-            default_value="false",
-            description="Passively record fast-trot status and canonical commands",
-        ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic_output",
-            default_value="",
-            description="Optional diagnostic CSV path or output directory",
         ),
         ignition_launch,
         # Router and motion controller are safe to start immediately: the router

@@ -48,7 +48,7 @@ SINGLE_LEG_STEP = "single-leg-step"
 DIAGONAL_PAIR_LIFT = "diagonal-pair-lift"
 ZERO_STRIDE_TROT = "zero-stride-trot"
 SLOW_CREEP = "slow-creep"
-PHYSICAL_FAST_TROT = "physical-fast-trot"
+TROT_SPEED_TEST = "trot-speed"
 EMERGENCY_STOP = "emergency-stop"
 
 CARTESIAN_TEST_MODES = (
@@ -62,7 +62,7 @@ CARTESIAN_TEST_MODES = (
 GAIT_TEST_MODES = (
     ZERO_STRIDE_TROT,
     SLOW_CREEP,
-    PHYSICAL_FAST_TROT,
+    TROT_SPEED_TEST,
 )
 TEST_MODES = CARTESIAN_TEST_MODES + GAIT_TEST_MODES + (EMERGENCY_STOP,)
 
@@ -97,7 +97,7 @@ DEFAULT_DURATIONS = {
     DIAGONAL_PAIR_LIFT: 10.0,
     ZERO_STRIDE_TROT: 6.0,
     SLOW_CREEP: 8.0,
-    PHYSICAL_FAST_TROT: 6.0,
+    TROT_SPEED_TEST: 6.0,
 }
 MIN_DURATIONS = {
     STAND: 2.0,
@@ -108,7 +108,7 @@ MIN_DURATIONS = {
     DIAGONAL_PAIR_LIFT: 8.0,
     ZERO_STRIDE_TROT: 3.0,
     SLOW_CREEP: 5.0,
-    PHYSICAL_FAST_TROT: 4.0,
+    TROT_SPEED_TEST: 4.0,
 }
 MAX_DURATIONS = {
     mode: 20.0 for mode in DEFAULT_DURATIONS
@@ -124,10 +124,10 @@ SERIAL_COMMAND_TOPIC = "/volt/serial_command"
 STATUS_TOPIC = "/volt/status"
 SERIAL_STATUS_TOPIC = "/volt/serial_status"
 ROUTER_STATUS_TOPIC = "/volt/command_router_status"
-SLOW_CREEP_GAIT = "spotmicro_video_walk"
-FAST_TROT_GAIT = "fast_trot"
+SLOW_CREEP_GAIT = "amble"
+FAST_TROT_GAIT = "trot"
 SLOW_CREEP_SPEED = 0.004
-PHYSICAL_FAST_TROT_SPEED = 0.030
+TROT_SPEED_TEST_SPEED = 0.030
 COMMAND_RATE = 20.0
 REQUEST_KEEPALIVE_PERIOD = 0.20
 STEP_KEEPALIVE_PERIOD = 0.20
@@ -217,7 +217,6 @@ def physical_stack_status_errors(status, require_stopped=True):
     exact = (
         ("hardware_mode", True),
         ("use_sim_time", False),
-        ("fast_trot_profile", "physical"),
         ("physical_tests_enabled", True),
         ("command_owner", "MOTION"),
         ("motion_authorized", True),
@@ -229,8 +228,6 @@ def physical_stack_status_errors(status, require_stopped=True):
         )
         if not matches:
             errors.append("%s must equal %r" % (name, expected))
-    if not str(status.get("fast_trot_config_file", "")).strip():
-        errors.append("dedicated physical fast-trot config path is missing")
     if require_stopped:
         stopped_exact = (
             ("state", "standing"),
@@ -1250,7 +1247,7 @@ def _run_ros(plan):
                 )
             return self.run_velocity_gait(
                 FAST_TROT_GAIT,
-                PHYSICAL_FAST_TROT_SPEED,
+                TROT_SPEED_TEST_SPEED,
             )
 
     # Retain Python's SIGINT -> KeyboardInterrupt behavior when supported so

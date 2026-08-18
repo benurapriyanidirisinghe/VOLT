@@ -17,7 +17,6 @@ from volt_gait_controller import (
     limit_velocity_command,
     load_gait_configs,
     normalized_velocity_activity,
-    validate_fast_trot_tuning,
 )
 from volt_kinematics import (
     JOINT_NAMES,
@@ -62,14 +61,12 @@ from volt_real_profiles import (
 )
 
 
-# Default hardware gaits retain the conservative 30 deg/s cap. Physical
-# fast_trot has its own validated 110 deg/s cap below the current 120 deg/s
-# firmware source; its feedback-governed phase clock prevents that exception
-# from turning into contact-phase lag.
-SIMULATION_JOINT_VELOCITY_LIMIT = math.radians(118.0)
-HARDWARE_JOINT_VELOCITY_LIMIT = math.radians(30.0)
+# Per-gait joint velocity caps come from the gait configuration, which the
+# gait engine validates against the servo budgets at load; these are only
+# the fallbacks when no gait config value applies.
+SIMULATION_JOINT_VELOCITY_LIMIT = math.radians(190.0)
+HARDWARE_JOINT_VELOCITY_LIMIT = math.radians(190.0)
 DEFAULT_JOINT_ACCELERATION_LIMIT = 18.0
-SIMULATION_FAST_TROT_JOINT_ACCELERATION_LIMIT = 60.0
 COMMAND_OWNERS = {
     "MOTION",
     "MANUAL",
@@ -142,7 +139,6 @@ class VoltMotionController(Node):
             "gait_config_file",
             str(default_gait_config_path()),
         )
-        self.declare_parameter("physical_fast_trot_config_file", "")
         self.declare_parameter(
             "real_robot_profiles_file",
             str(default_profile_path()),
@@ -265,29 +261,12 @@ class VoltMotionController(Node):
                 "keepalive, and physical-test deadlines cannot pause with /clock"
             )
         gait_config_file = str(self.get_parameter("gait_config_file").value)
-        physical_fast_trot_config_file = str(
-            self.get_parameter("physical_fast_trot_config_file").value
-        ).strip()
-        if self.hardware_mode and not physical_fast_trot_config_file:
-            raise ValueError(
-                "hardware_mode requires a dedicated "
-                "physical_fast_trot_config_file"
-            )
-        selected_fast_trot_file = (
-            physical_fast_trot_config_file
-            if self.hardware_mode and physical_fast_trot_config_file
-            else gait_config_file
-        )
         try:
-            self.gait_configs = load_gait_configs(
-                gait_config_file,
-                selected_fast_trot_file,
-            )
+            self.gait_configs = load_gait_configs(gait_config_file)
         except (OSError, ValueError) as exc:
             self.get_logger().fatal("Invalid gait configuration: %s" % exc)
             raise
         self.gait_config_file = gait_config_file
-        self.fast_trot_config_file = selected_fast_trot_file
         self.real_profiles_file = str(
             self.get_parameter("real_robot_profiles_file").value
         ).strip()
@@ -351,12 +330,6 @@ class VoltMotionController(Node):
         self.create_subscription(String, "/volt/gait", self.gait_callback, 10)
         self.create_subscription(
             String,
-            "/volt/fast_trot_tuning",
-            self.fast_trot_tuning_callback,
-            10,
-        )
-        self.create_subscription(
-            String,
             "/volt/real_robot_tuning",
             self.real_robot_tuning_callback,
             10,
@@ -405,10 +378,10 @@ class VoltMotionController(Node):
             self.open_loop_warning,
         ) = initial_motion_state(self.open_loop_hardware)
         self.command_owner = "UNKNOWN"
-        self.gait_name = (
+        self.gait_name = canonical_gait_name(
             self.applied_real_tuning["gait"]
             if self.hardware_mode
-            else canonical_gait_name("walk")
+            else "amble"
         )
         self.requested_gait = self.gait_name
         self.step_in_place = False
@@ -537,11 +510,6 @@ class VoltMotionController(Node):
             else []
         )
         self.last_filtered_joint_target = list(self.last_raw_joint_target)
-        # Raw-jump diagnostics compare only consecutive samples actually owned
-        # by the active fast-trot trajectory.  The selected gait name persists
-        # while emotes and pose transitions run, so the global raw target is not
-        # a valid fast-trot baseline.
-        self.last_fast_trot_raw_joint_target = []
         self.joint_command_delta_deg = {
             name: 0.0 for name in JOINT_NAMES
         }
@@ -556,48 +524,6 @@ class VoltMotionController(Node):
             "pitch": self.body_pitch,
             "yaw": self.body_yaw,
         }
-        self.fast_trot_completed_cycles = 0
-        self.fast_trot_last_cycle_phase = None
-        self.fast_trot_stance_start_x = {
-            leg: None for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_last_x = {
-            leg: None for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_direction = {
-            leg: 1.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_max_ground_error = {
-            leg: 0.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_active = {
-            leg: False for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_completion_pending = set()
-        self.fast_trot_completed_stance_strides = {}
-        self.fast_trot_completed_stance_ground_errors = {}
-        self.fast_trot_swing_max_clearance = {
-            leg: 0.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_completed_swing_clearances = {}
-        self.fast_trot_cycle_joint_ranges = [
-            [float("inf"), float("-inf")] for _ in JOINT_NAMES
-        ]
-        self.fast_trot_achieved_stride = 0.0
-        self.fast_trot_signed_stride = 0.0
-        self.fast_trot_stance_grounded = False
-        self.fast_trot_max_stance_ground_error = 0.0
-        self.fast_trot_achieved_step_height = 0.0
-        self.fast_trot_cycle_requested_stride = 0.0
-        self.fast_trot_completed_requested_stride = 0.0
-        self.fast_trot_cycle_max_abs_yaw = 0.0
-        self.fast_trot_stride_metric_valid = True
-        self.fast_trot_max_joint_excursion_deg = 0.0
-        self.fast_trot_joint_excursions_deg = {
-            name: 0.0 for name in JOINT_NAMES
-        }
-        self.fast_trot_diagnostic_active = False
-        self.fast_trot_measurement_ready = False
         self.arduino_frame_rate = 0.0
 
         period = 1.0 / max(self.control_rate, 1.0)
@@ -800,48 +726,6 @@ class VoltMotionController(Node):
                 "Cancelled queued gait switch; waiting for neutral then "
                 "a fresh velocity command."
             )
-
-    def fast_trot_tuning_callback(self, message):
-        """Apply one bounded request only while every gait foot is grounded."""
-        try:
-            tuning = json.loads(message.data)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.warning = "Rejected malformed FAST TROT tuning JSON."
-            self.get_logger().warning(self.warning)
-            return
-        if (
-            self.gait_controller.active
-            or self.state != "standing"
-            or self.transition is not None
-            or self.pending_pose_action is not None
-            or getattr(self, "physical_test", None) is not None
-            or self.emote_playback_active()
-            or self.emote_request_pending()
-        ):
-            self.warning = (
-                "FAST TROT tuning rejected while motion is active; "
-                "STOP and wait for all feet to settle."
-            )
-            self.get_logger().warning(self.warning)
-            return
-        try:
-            validated = validate_fast_trot_tuning(
-                self.gait_configs["fast_trot"],
-                tuning,
-            )
-            self.gait_controller.set_fast_trot_tuning(validated)
-        except (TypeError, ValueError) as exc:
-            self.warning = "Rejected FAST TROT tuning: %s" % exc
-            self.get_logger().warning(self.warning)
-            return
-        self.reset_fast_trot_cycle_diagnostics()
-        if self.warning.startswith("Rejected FAST TROT"):
-            self.warning = ""
-        self.get_logger().info(
-            "Applied stopped-state FAST TROT tuning: %s"
-            % json.dumps(validated, sort_keys=True)
-        )
-
     def real_tuning_idle_reason(self):
         """Return why a full profile transaction cannot be applied now."""
         if self.state != "standing":
@@ -910,7 +794,14 @@ class VoltMotionController(Node):
             for leg in LEG_ORDER
         }
         samples = [feet]
-        reach_scale = 1.0 if tuning["gait"] == "diagnostic_crawl" else 0.5
+        # The amble sweeps the full stride from a single planted stance
+        # (one leg at a time), while the trot splits it across the diagonal
+        # pair; preflight the reach the gait will actually use.
+        reach_scale = (
+            1.0
+            if canonical_gait_name(tuning["gait"]) == "amble"
+            else 0.5
+        )
         x_limit = reach_scale * tuning["stride_length"]
         y_limit = reach_scale * tuning["lateral_stride_width"]
         # Profile apply is an infrequent stopped-state transaction. Sampling
@@ -992,7 +883,13 @@ class VoltMotionController(Node):
             return
 
         if not self.hardware_mode:
-            if requested_profile != "SIMULATION" or tuning["gait"] != "spotmicro_video_walk":
+            simulation_gait = canonical_gait_name(
+                self.real_profiles["SIMULATION"]["gait"]
+            )
+            if (
+                requested_profile != "SIMULATION"
+                or canonical_gait_name(tuning["gait"]) != simulation_gait
+            ):
                 self.reject_real_tuning(
                     request_id,
                     "real profiles require hardware_mode; simulation accepts only SIMULATION",
@@ -1884,57 +1781,6 @@ class VoltMotionController(Node):
             return
         if math.isfinite(frame_rate) and frame_rate >= 0.0:
             self.arduino_frame_rate = frame_rate
-
-    def reset_fast_trot_cycle_diagnostics(self):
-        self.fast_trot_completed_cycles = 0
-        self.fast_trot_last_cycle_phase = None
-        self.fast_trot_stance_start_x = {
-            leg: None for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_last_x = {
-            leg: None for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_direction = {
-            leg: 1.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_max_ground_error = {
-            leg: 0.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_active = {
-            leg: False for leg in LEG_ORDER
-        }
-        self.fast_trot_stance_completion_pending = set()
-        self.fast_trot_completed_stance_strides = {}
-        self.fast_trot_completed_stance_ground_errors = {}
-        self.fast_trot_swing_max_clearance = {
-            leg: 0.0 for leg in LEG_ORDER
-        }
-        self.fast_trot_completed_swing_clearances = {}
-        self.fast_trot_cycle_joint_ranges = [
-            [float("inf"), float("-inf")] for _ in JOINT_NAMES
-        ]
-        self.fast_trot_achieved_stride = 0.0
-        self.fast_trot_signed_stride = 0.0
-        self.fast_trot_stance_grounded = False
-        self.fast_trot_max_stance_ground_error = 0.0
-        self.fast_trot_achieved_step_height = 0.0
-        self.fast_trot_cycle_requested_stride = 0.0
-        self.fast_trot_completed_requested_stride = 0.0
-        self.fast_trot_cycle_max_abs_yaw = 0.0
-        self.fast_trot_stride_metric_valid = True
-        self.fast_trot_max_joint_excursion_deg = 0.0
-        self.fast_trot_joint_excursions_deg = {
-            name: 0.0 for name in JOINT_NAMES
-        }
-        self.fast_trot_diagnostic_active = False
-        self.fast_trot_measurement_ready = False
-        self.joint_velocity_clamp_counts = [0 for _ in JOINT_NAMES]
-        self.joint_braking_clamp_counts = [0 for _ in JOINT_NAMES]
-        self.joint_acceleration_clamp_counts = [0 for _ in JOINT_NAMES]
-        self.joint_delta_clamp_counts = [0 for _ in JOINT_NAMES]
-        self.ik_projection_count = 0
-        self.joint_limit_clamp_count = 0
-
     def body_pose_callback(self, message):
         values = (
             float(message.linear.x),
@@ -1995,27 +1841,6 @@ class VoltMotionController(Node):
                 throttle_duration_sec=1.0,
             )
             return
-        if self.gait_name == "fast_trot":
-            changed = self.enforce_fast_trot_body_pose()
-            non_neutral_request = any(
-                abs(value) > 1e-9
-                for value in (
-                    values[0],
-                    values[1],
-                    values[2] - self.neutral_body_height,
-                    values[3],
-                    values[4],
-                    values[5],
-                )
-            )
-            if changed or non_neutral_request:
-                self.warning = (
-                    "FAST TROT owns body posture; ignored external "
-                    "body-pose command."
-                )
-            elif self.warning.startswith("FAST TROT owns body posture"):
-                self.warning = ""
-            return
         self.body_x = clamp(values[0], -0.025, 0.025)
         self.body_y = clamp(values[1], -0.020, 0.020)
         self.body_height = clamp(values[2], 0.175, 0.220)
@@ -2041,41 +1866,6 @@ class VoltMotionController(Node):
             clamp(float(roll), -roll_limit, roll_limit),
             clamp(float(pitch), -pitch_limit, pitch_limit),
         )
-
-    def enforce_fast_trot_body_pose(self):
-        """Keep manual body-pose offsets out of the validated trot workspace."""
-        if self.gait_name != "fast_trot":
-            return False
-        safe_values = (
-            self.neutral_body_height,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        )
-        current_values = (
-            self.body_height,
-            self.body_x,
-            self.body_y,
-            self.body_roll,
-            self.body_pitch,
-            self.body_yaw,
-        )
-        changed = any(
-            abs(float(current) - float(safe)) > 1e-12
-            for current, safe in zip(current_values, safe_values)
-        )
-        (
-            self.body_height,
-            self.body_x,
-            self.body_y,
-            self.body_roll,
-            self.body_pitch,
-            self.body_yaw,
-        ) = safe_values
-        return changed
-
     def action_callback(self, message):
         action = message.data.strip().lower()
         if action == "stand":
@@ -2610,13 +2400,7 @@ class VoltMotionController(Node):
             self.body_pitch,
             gait_name,
         )
-        if gait_name == "fast_trot":
-            self.enforce_fast_trot_body_pose()
-        if self.warning.startswith("FAST TROT owns body posture"):
-            self.warning = ""
         self.gait_controller.set_gait(gait_name, now)
-        if gait_name == "fast_trot":
-            self.reset_fast_trot_cycle_diagnostics()
         self.require_neutral_velocity()
         self.get_logger().info("Selected %s gait." % gait_name)
 
@@ -2908,13 +2692,10 @@ class VoltMotionController(Node):
                 [],
             )
         ]
-        if (
-            getattr(self, "gait_name", "") == "fast_trot"
-            and getattr(
-                getattr(self, "gait_controller", None),
-                "active",
-                False,
-            )
+        if getattr(
+            getattr(self, "gait_controller", None),
+            "active",
+            False,
         ):
             self.ik_projection_count = getattr(
                 self,
@@ -2985,8 +2766,6 @@ class VoltMotionController(Node):
         }
 
     def gait_target(self, now, dt):
-        if self.gait_name == "fast_trot":
-            self.enforce_fast_trot_body_pose()
         if not self.gait_controller.active:
             seed_positions = (
                 self.commanded_positions
@@ -3089,45 +2868,23 @@ class VoltMotionController(Node):
                     )
                 ),
             )
-        if self.hardware_mode:
-            gait_configs = getattr(self, "gait_configs", GAITS)
-            gait = gait_configs.get(getattr(self, "gait_name", ""), {})
-            if gait.get("type") == "physical_trot":
-                joint_kind = index % 3
-                per_joint_name = (
-                    "shoulder_joint_velocity_limit",
-                    "upper_leg_joint_velocity_limit",
-                    "knee_joint_velocity_limit",
-                )[joint_kind]
-                profile_limit = math.radians(
-                    min(
-                        gait["joint_velocity_limit"],
-                        gait[per_joint_name],
-                    )
-                )
-            elif "real_tuning" in gait:
-                profile_limit = math.radians(
-                    float(
-                        getattr(self, "applied_real_tuning", {}).get(
-                            "max_joint_velocity_deg_s",
-                            math.degrees(HARDWARE_JOINT_VELOCITY_LIMIT),
-                        )
-                    )
-                )
-            else:
-                profile_limit = HARDWARE_JOINT_VELOCITY_LIMIT
+        # While the gait engine owns the target, its servo-budget-validated
+        # velocity cap applies; the engine guaranteed at config load that the
+        # planned trajectory stays inside it, so the clamp is a fault ceiling
+        # rather than a shaping filter.  Emotes, transitions, and holds keep
+        # the gentler backend defaults.
+        gait_configs = getattr(self, "gait_configs", GAITS)
+        gait = gait_configs.get(getattr(self, "gait_name", ""), {})
+        gait_active = bool(
+            getattr(getattr(self, "gait_controller", None), "active", False)
+        )
+        cap_deg_s = float(gait.get("joint_velocity_limit_deg_s", 0.0))
+        if gait_active and cap_deg_s > 0.0:
+            profile_limit = math.radians(cap_deg_s)
+        elif self.hardware_mode:
+            profile_limit = HARDWARE_JOINT_VELOCITY_LIMIT
         else:
-            gait_configs = getattr(self, "gait_configs", GAITS)
-            gait = gait_configs.get(getattr(self, "gait_name", ""), {})
-            # The fast-trot simulator runs at the deliberately shorter
-            # Cartesian cycle period.  Let each URDF joint limit (and the
-            # node-wide max_joint_velocity guard) remain authoritative
-            # instead of additionally imposing the legacy all-joint
-            # 118 deg/s profile cap.  Other gaits retain that cap.
-            if gait.get("type") == "physical_trot":
-                profile_limit = getattr(self, "max_joint_velocity", 4.0)
-            else:
-                profile_limit = SIMULATION_JOINT_VELOCITY_LIMIT
+            profile_limit = SIMULATION_JOINT_VELOCITY_LIMIT
         return min(
             getattr(self, "max_joint_velocity", 4.0),
             JOINT_VELOCITY_LIMITS[index],
@@ -3147,13 +2904,6 @@ class VoltMotionController(Node):
                     ]
                 )
             )
-        elif gait.get("type") == "physical_trot":
-            profile_limit = float(
-                gait.get(
-                    "joint_acceleration_limit",
-                    SIMULATION_FAST_TROT_JOINT_ACCELERATION_LIMIT,
-                )
-            )
         elif self.hardware_mode and "real_tuning" in gait:
             profile_limit = math.radians(
                 float(
@@ -3164,7 +2914,21 @@ class VoltMotionController(Node):
                 )
             )
         else:
-            profile_limit = DEFAULT_JOINT_ACCELERATION_LIMIT
+            cap_deg_s2 = float(
+                gait.get("joint_acceleration_limit_deg_s2", 0.0)
+            )
+            gait_active = bool(
+                getattr(
+                    getattr(self, "gait_controller", None), "active", False
+                )
+            )
+            if gait_active and cap_deg_s2 > 0.0:
+                # The gait engine validated at load that the planned
+                # trajectory's acceleration fits inside this cap, so the
+                # limiter below is a fault ceiling, not a shaping filter.
+                profile_limit = math.radians(cap_deg_s2)
+            else:
+                profile_limit = DEFAULT_JOINT_ACCELERATION_LIMIT
         return min(
             getattr(
                 self,
@@ -3293,242 +3057,10 @@ class VoltMotionController(Node):
             next_velocity = current_velocity + constrained_velocity_step
 
             next_position = current + next_velocity * dt
-            if self.hardware_mode and gait.get("type") == "physical_trot":
-                maximum_delta = math.radians(
-                    gait["max_joint_command_delta_deg"]
-                )
-                bounded_position = clamp(
-                    next_position,
-                    current - maximum_delta,
-                    current + maximum_delta,
-                )
-                if abs(bounded_position - next_position) > 1e-12:
-                    counts = getattr(
-                        self,
-                        "joint_delta_clamp_counts",
-                        [0 for _ in JOINT_NAMES],
-                    )
-                    counts[index] += 1
-                    self.joint_delta_clamp_counts = counts
-                    next_position = bounded_position
-                    next_velocity = (next_position - current) / max(dt, 1e-6)
 
             self.commanded_velocities[index] = next_velocity
             smoothed.append(next_position)
         return smoothed
-
-    def update_fast_trot_cycle_diagnostics(self, raw_target, filtered_target):
-        """Measure signed, grounded stride after smoothing and rate limits."""
-        self.last_raw_joint_target = list(raw_target)
-        self.last_filtered_joint_target = list(filtered_target)
-        if self.gait_name != "fast_trot":
-            self.fast_trot_diagnostic_active = False
-            return
-        if not self.gait_controller.active:
-            self.fast_trot_diagnostic_active = False
-            return
-        if not getattr(self, "fast_trot_diagnostic_active", False):
-            self.reset_fast_trot_cycle_diagnostics()
-            self.fast_trot_diagnostic_active = True
-
-        debug = self.gait_controller.debug_snapshot()
-        phase = float(debug.get("phase", 0.0)) % 1.0
-        self.fast_trot_last_cycle_phase = phase
-
-        try:
-            commanded_feet = joint_positions_to_feet(
-                filtered_target,
-                **self.last_gait_body_transform,
-            )
-        except (KinematicsError, TypeError, ValueError):
-            commanded_feet = None
-
-        stance_legs = set(debug.get("stance_legs", []))
-        if float(debug.get("startup_scale", 0.0)) < 1.0 - 1e-6:
-            return
-        if not self.fast_trot_measurement_ready:
-            self.fast_trot_measurement_ready = True
-            self.fast_trot_stance_active = {
-                leg: leg in stance_legs for leg in LEG_ORDER
-            }
-            return
-
-        ground_tolerance = float(
-            self.gait_configs["fast_trot"]["stance_ground_tolerance"]
-        )
-        planned_velocity = debug.get(
-            "planned_velocity",
-            (0.0, 0.0, 0.0),
-        )
-        try:
-            planned_yaw = abs(float(planned_velocity[2]))
-        except (IndexError, TypeError, ValueError):
-            planned_yaw = float("inf")
-        self.fast_trot_cycle_max_abs_yaw = max(
-            self.fast_trot_cycle_max_abs_yaw,
-            planned_yaw,
-        )
-        if commanded_feet is not None:
-            try:
-                forward_direction = math.copysign(
-                    1.0,
-                    float(planned_velocity[0]),
-                )
-            except (IndexError, TypeError, ValueError):
-                forward_direction = 1.0
-            for leg_name in LEG_ORDER:
-                is_stance = leg_name in stance_legs
-                was_stance = self.fast_trot_stance_active[leg_name]
-                x_value = float(commanded_feet[leg_name][0])
-                z_value = float(commanded_feet[leg_name][2])
-                if was_stance and not is_stance:
-                    start_x = self.fast_trot_stance_start_x[leg_name]
-                    last_x = self.fast_trot_stance_last_x[leg_name]
-                    if (
-                        start_x is not None
-                        and last_x is not None
-                        and math.isfinite(start_x)
-                        and math.isfinite(last_x)
-                    ):
-                        direction = self.fast_trot_stance_direction[
-                            leg_name
-                        ]
-                        signed_stride = direction * (start_x - last_x)
-                        self.fast_trot_completed_stance_strides[leg_name] = (
-                            signed_stride
-                        )
-                        self.fast_trot_completed_stance_ground_errors[
-                            leg_name
-                        ] = self.fast_trot_stance_max_ground_error[
-                            leg_name
-                        ]
-                        self.fast_trot_stance_completion_pending.add(
-                            leg_name
-                        )
-                    self.fast_trot_stance_start_x[leg_name] = None
-                    self.fast_trot_stance_last_x[leg_name] = None
-                    self.fast_trot_stance_max_ground_error[leg_name] = 0.0
-                    self.fast_trot_swing_max_clearance[leg_name] = 0.0
-                elif not was_stance and is_stance:
-                    self.fast_trot_completed_swing_clearances[leg_name] = (
-                        self.fast_trot_swing_max_clearance[leg_name]
-                    )
-                if is_stance:
-                    if not was_stance:
-                        self.fast_trot_stance_start_x[leg_name] = x_value
-                        self.fast_trot_stance_direction[
-                            leg_name
-                        ] = forward_direction
-                        self.fast_trot_stance_max_ground_error[
-                            leg_name
-                        ] = 0.0
-                    self.fast_trot_stance_last_x[leg_name] = x_value
-                    ground_error = abs(
-                        z_value - NOMINAL_FEET[leg_name][2]
-                    )
-                    self.fast_trot_stance_max_ground_error[leg_name] = max(
-                        self.fast_trot_stance_max_ground_error[leg_name],
-                        ground_error,
-                    )
-                else:
-                    self.fast_trot_swing_max_clearance[leg_name] = max(
-                        self.fast_trot_swing_max_clearance[leg_name],
-                        z_value - NOMINAL_FEET[leg_name][2],
-                    )
-                self.fast_trot_stance_active[leg_name] = is_stance
-
-        completed_stance_cycle = (
-            len(self.fast_trot_stance_completion_pending)
-            == len(LEG_ORDER)
-        )
-        if completed_stance_cycle:
-            strides = [
-                self.fast_trot_completed_stance_strides[leg]
-                for leg in LEG_ORDER
-                if leg in self.fast_trot_completed_stance_strides
-            ]
-            ground_errors = [
-                self.fast_trot_completed_stance_ground_errors[leg]
-                for leg in LEG_ORDER
-                if leg in self.fast_trot_completed_stance_ground_errors
-            ]
-            swing_clearances = [
-                self.fast_trot_completed_swing_clearances[leg]
-                for leg in LEG_ORDER
-                if leg in self.fast_trot_completed_swing_clearances
-            ]
-            excursions = [
-                bounds[1] - bounds[0]
-                for bounds in self.fast_trot_cycle_joint_ranges
-                if all(math.isfinite(value) for value in bounds)
-            ]
-            if len(strides) == len(LEG_ORDER):
-                self.fast_trot_signed_stride = min(strides)
-            if len(ground_errors) == len(LEG_ORDER):
-                self.fast_trot_max_stance_ground_error = max(
-                    ground_errors
-                )
-                self.fast_trot_stance_grounded = (
-                    self.fast_trot_max_stance_ground_error
-                    <= ground_tolerance
-                )
-            if len(swing_clearances) == len(LEG_ORDER):
-                self.fast_trot_achieved_step_height = min(
-                    swing_clearances
-                )
-            self.fast_trot_achieved_stride = (
-                max(0.0, self.fast_trot_signed_stride)
-                if self.fast_trot_stance_grounded
-                else 0.0
-            )
-            self.fast_trot_completed_requested_stride = (
-                self.fast_trot_cycle_requested_stride
-            )
-            self.fast_trot_stride_metric_valid = (
-                self.fast_trot_cycle_max_abs_yaw
-                <= self.fast_trot_stride_metric_yaw_threshold()
-            )
-            if len(excursions) == len(JOINT_NAMES):
-                excursion_degrees = [
-                    math.degrees(value) for value in excursions
-                ]
-                self.fast_trot_joint_excursions_deg = {
-                    name: value
-                    for name, value in zip(
-                        JOINT_NAMES,
-                        excursion_degrees,
-                    )
-                }
-                self.fast_trot_max_joint_excursion_deg = max(
-                    excursion_degrees,
-                    default=0.0,
-                )
-            self.fast_trot_completed_cycles += 1
-            self.fast_trot_stance_completion_pending.clear()
-            self.fast_trot_cycle_joint_ranges = [
-                [float("inf"), float("-inf")] for _ in JOINT_NAMES
-            ]
-            self.fast_trot_cycle_requested_stride = 0.0
-            self.fast_trot_cycle_max_abs_yaw = 0.0
-
-        for index, value in enumerate(filtered_target):
-            bounds = self.fast_trot_cycle_joint_ranges[index]
-            bounds[0] = min(bounds[0], float(value))
-            bounds[1] = max(bounds[1], float(value))
-        self.fast_trot_cycle_requested_stride = max(
-            self.fast_trot_cycle_requested_stride,
-            float(debug.get("requested_stride", 0.0)),
-        )
-
-    def fast_trot_stride_metric_yaw_threshold(self):
-        """Bound signed body-X stride reporting to near-straight motion."""
-        config = self.gait_configs["fast_trot"]
-        yaw_limit = self.gait_velocity_limits(
-            "fast_trot",
-            config,
-            True,
-        )[2]
-        return max(0.01, 0.10 * abs(float(yaw_limit)))
 
     def log_gait_debug(self, now, feet, joints):
         if not self.debug_gait:
@@ -3593,30 +3125,17 @@ class VoltMotionController(Node):
         gait = self.gait_configs[self.gait_name]
         speed_scale = self.active_speed_scale(gait)
         limits = list(self.gait_velocity_limits(self.gait_name, gait, True))
-        desired = limit_velocity_command(desired, limits)
-        if gait.get("type") in ("spot_walk", "stable_crawl"):
-            lateral = abs(desired[1]) / max(limits[1], 1e-9)
-            turning = abs(desired[2]) / max(limits[2], 1e-9)
-            if lateral > 0.05 and turning > 0.05:
-                combined = math.hypot(lateral, turning)
-                if combined > 0.65:
-                    reduction = 0.65 / combined
-                    desired[1] *= reduction
-                    desired[2] *= reduction
-        acceleration = gait.get("acceleration")
-        if acceleration is None:
-            rates = [
-                max(0.18, gait["max_x"] * 3.0),
-                max(0.12, gait["max_y"] * 3.0),
-                max(1.20, gait["max_yaw"] * 3.0),
-            ]
-        else:
-            rates = [
-                max(0.01, acceleration * speed_scale),
-                max(0.008, acceleration * 0.55 * speed_scale),
-                max(0.10, gait["max_yaw"] * 2.0 * speed_scale),
-            ]
-        smoothing = clamp(gait.get("smoothing_factor", 0.15), 0.02, 1.0)
+        # limit_velocity_command also applies the combined-axis cap the gait
+        # engine's servo-budget validation assumed, so a joystick pushing
+        # every axis at once cannot exceed the validated mixed command.
+        desired = list(limit_velocity_command(desired, limits))
+        acceleration = float(gait["command_acceleration"]) * speed_scale
+        rates = [
+            max(0.01, acceleration),
+            max(0.008, acceleration * 0.55),
+            max(0.10, gait["max_yaw"] * 2.0 * speed_scale),
+        ]
+        smoothing = clamp(gait["velocity_filter_alpha"], 0.02, 1.0)
         for index in range(3):
             # Apply the low-pass blend before the acceleration guard.  The old
             # order slew-limited the command and then multiplied that tiny step
@@ -3632,59 +3151,36 @@ class VoltMotionController(Node):
                 -maximum_change,
                 maximum_change,
             )
+            # The exponential decay toward zero otherwise underflows into
+            # denormals (observed 5e-324 in status) and never reaches rest.
+            if abs(self.filtered_velocity[index]) < 1e-6:
+                self.filtered_velocity[index] = 0.0
+        if (
+            not self.gait_controller.active
+            and self.velocity_is_neutral(self.requested_velocity)
+            and all(abs(value) < 1e-6 for value in self.filtered_velocity)
+        ):
+            release = getattr(
+                self.gait_controller, "release_forced_stop", None
+            )
+            if callable(release):
+                release()
 
     def active_speed_scale(self, gait=None):
-        """Return the active profile's simulation/hardware command scale."""
+        """Return the active gait's backend command scale."""
         gait = gait or self.gait_configs[self.gait_name]
-        if gait.get("type") == "physical_trot":
-            if self.hardware_mode:
-                gait_controller = getattr(self, "gait_controller", None)
-                tuning = getattr(gait_controller, "fast_trot_tuning", None)
-                if isinstance(tuning, dict):
-                    return float(tuning["hardware_speed_scale"])
-                return float(gait["presets"]["bench"]["hardware_speed_scale"])
-            return float(gait["simulation_speed_scale"])
         if self.hardware_mode:
-            return gait.get(
-                "hardware_speed_scale",
-                self.gait_configs["spot_walk"]["hardware_speed_scale"],
-            )
-        return gait.get(
-            "simulation_speed_scale",
-            self.gait_configs["spot_walk"]["simulation_speed_scale"],
-        )
+            return float(gait.get("hardware_speed_scale", 1.0))
+        return 1.0
 
     def gait_velocity_limits(self, gait_name, gait=None, effective=True):
-        """Return backend-aware Twist limits without mixing stride scaling."""
+        """Return the gait's Twist limits, backend-scaled when effective."""
         gait = gait or self.gait_configs[gait_name]
-        if gait.get("type") == "physical_trot":
-            if self.hardware_mode:
-                command_max_x = gait["hardware_max_x"]
-                gait_controller = getattr(self, "gait_controller", None)
-                tuning = getattr(gait_controller, "fast_trot_tuning", None)
-                period = (
-                    float(tuning["hardware_cycle_period"])
-                    if isinstance(tuning, dict)
-                    else float(
-                        gait["presets"]["bench"]["hardware_cycle_period"]
-                    )
-                )
-            else:
-                command_max_x = gait["simulation_max_x"]
-                period = gait["simulation_cycle_period"]
-            command_limits = (
-                command_max_x,
-                gait["max_y"],
-                gait["max_yaw_step"] / (
-                    gait["stance_ratio"] * period
-                ),
-            )
-        else:
-            command_limits = (
-                gait["max_x"],
-                gait["max_y"],
-                gait["max_yaw"],
-            )
+        command_limits = (
+            gait["max_x"],
+            gait["max_y"],
+            gait["max_yaw"],
+        )
         if not effective:
             return command_limits
         scale = self.active_speed_scale(gait)
@@ -3710,36 +3206,11 @@ class VoltMotionController(Node):
         return limits
 
     def filtered_motion_requested(self):
-        """Classify filtered velocity using gait-compatible units."""
-        gait = self.gait_configs[self.gait_name]
-        if gait.get("type") == "stable_crawl":
-            return (
-                math.hypot(
-                    self.filtered_velocity[0],
-                    self.filtered_velocity[1],
-                )
-                > gait["command_deadband_linear"]
-                or abs(self.filtered_velocity[2])
-                > gait["command_deadband_yaw"]
-            )
-        if gait.get("type") == "spot_walk":
-            scale = self.active_speed_scale(gait)
-            effective = {
-                "max_x": gait["max_x"] * scale,
-                "max_y": gait["max_y"] * scale,
-                "max_yaw": gait["max_yaw"] * scale,
-            }
-            return (
-                normalized_velocity_activity(
-                    effective,
-                    self.filtered_velocity,
-                )
-                > gait["velocity_deadband"]
-            )
+        """Classify filtered velocity against the engine's deadbands."""
         return (
             abs(self.filtered_velocity[0]) > 0.0015
             or abs(self.filtered_velocity[1]) > 0.0015
-            or abs(self.filtered_velocity[2]) > 0.025
+            or abs(self.filtered_velocity[2]) > 0.010
         )
 
     def update_loop_timing(self, now, raw_dt):
@@ -3818,29 +3289,19 @@ class VoltMotionController(Node):
             default=0.0,
         )
 
-        fast_trot_sample = (
-            self.gait_name == "fast_trot"
-            and bool(getattr(self.gait_controller, "active", False))
-        )
-        previous_raw = getattr(
-            self,
-            "last_fast_trot_raw_joint_target",
-            [],
-        )
+        gait_sample = bool(getattr(self.gait_controller, "active", False))
+        previous_raw = getattr(self, "last_gait_raw_joint_target", [])
         raw_deltas = (
             [
                 math.degrees(abs(current - previous))
                 for current, previous in zip(raw_target, previous_raw)
             ]
-            if (
-                fast_trot_sample
-                and len(previous_raw) == len(JOINT_NAMES)
-            )
+            if gait_sample and len(previous_raw) == len(JOINT_NAMES)
             else [0.0 for _ in JOINT_NAMES]
         )
         self.maximum_raw_joint_jump_deg = max(raw_deltas, default=0.0)
-        self.last_fast_trot_raw_joint_target = (
-            list(raw_target) if fast_trot_sample else []
+        self.last_gait_raw_joint_target = (
+            list(raw_target) if gait_sample else []
         )
         knee_indices = (2, 5, 8, 11)
         self.ik_branch_continuous = all(
@@ -3848,20 +3309,20 @@ class VoltMotionController(Node):
             for index in knee_indices
         )
         if (
-            fast_trot_sample
+            gait_sample
             and len(previous_raw) == len(JOINT_NAMES)
             and self.maximum_raw_joint_jump_deg
             > getattr(self, "sudden_joint_jump_deg", 10.0)
         ):
             self.get_logger().warning(
-                "FAST TROT raw joint target jumped %.1f deg; phase will "
+                "Gait raw joint target jumped %.1f deg; phase will "
                 "remain downstream-limited."
                 % self.maximum_raw_joint_jump_deg,
                 throttle_duration_sec=1.0,
             )
-        if fast_trot_sample and not self.ik_branch_continuous:
+        if gait_sample and not self.ik_branch_continuous:
             self.get_logger().error(
-                "FAST TROT knee branch continuity check failed.",
+                "Gait knee branch continuity check failed.",
                 throttle_duration_sec=1.0,
             )
 
@@ -3963,7 +3424,6 @@ class VoltMotionController(Node):
         else:
             self.gait_command_lag = 0.0
         self.record_joint_command_deltas(raw_target, target)
-        self.update_fast_trot_cycle_diagnostics(raw_target, target)
         self.commanded_positions = target
         self.complete_pose_transition_after_filter(raw_target)
         self.complete_emote_after_filter(raw_target, target)
@@ -4107,74 +3567,6 @@ class VoltMotionController(Node):
             )
             else ""
         )
-        fast_trot_tuning = dict(
-            getattr(
-                self.gait_controller,
-                "fast_trot_tuning",
-                {},
-            )
-        )
-        completed_cycles = getattr(self, "fast_trot_completed_cycles", 0)
-        if completed_cycles > 0:
-            requested_stride = getattr(
-                self,
-                "fast_trot_completed_requested_stride",
-                0.0,
-            )
-            achieved_stride = getattr(
-                self,
-                "fast_trot_achieved_stride",
-                0.0,
-            )
-        else:
-            requested_stride = float(debug.get("requested_stride", 0.0))
-            achieved_stride = 0.0
-        stride_ratio = (
-            achieved_stride / requested_stride
-            if requested_stride > 1e-9 and completed_cycles > 0
-            else 1.0
-        )
-        signed_stride = float(
-            getattr(self, "fast_trot_signed_stride", 0.0)
-        )
-        stance_grounded = bool(
-            getattr(self, "fast_trot_stance_grounded", False)
-        )
-        stance_ground_error = float(
-            getattr(
-                self,
-                "fast_trot_max_stance_ground_error",
-                0.0,
-            )
-        )
-        stride_metric_valid = bool(
-            getattr(self, "fast_trot_stride_metric_valid", True)
-        )
-        stride_warning = (
-            (
-                "FAST TROT stance is not grounded "
-                "(maximum commanded height error %.1f mm)"
-                % (stance_ground_error * 1000.0)
-            )
-            if (
-                self.gait_name == "fast_trot"
-                and completed_cycles > 0
-                and not stance_grounded
-            )
-            else (
-                "FAST TROT achieved signed stride %.1f mm is below 80%% "
-                "of requested %.1f mm"
-                % (signed_stride * 1000.0, requested_stride * 1000.0)
-                if (
-                    self.gait_name == "fast_trot"
-                    and completed_cycles > 0
-                    and requested_stride > 1e-9
-                    and stride_metric_valid
-                    and stride_ratio < 0.80
-                )
-                else ""
-            )
-        )
         timing_warning = (
             "Control loop missed %d deadlines; latest dt %.1f ms"
             % (
@@ -4182,7 +3574,7 @@ class VoltMotionController(Node):
                 1000.0 * getattr(self, "control_loop_dt_s", 0.0),
             )
             if (
-                self.gait_name == "fast_trot"
+                getattr(self.gait_controller, "active", False)
                 and getattr(self, "control_loop_dt_s", 0.0)
                 > 1.5 * getattr(
                     self,
@@ -4192,22 +3584,6 @@ class VoltMotionController(Node):
             )
             else ""
         )
-        joint_excursions_deg = dict(
-            getattr(self, "fast_trot_joint_excursions_deg", {})
-        )
-        joint_range_usage_percent = {}
-        for index, name in enumerate(JOINT_NAMES):
-            if index % 3 == 0:
-                lower, upper = SHOULDER_LIMIT
-            elif index % 3 == 1:
-                lower, upper = LEG_LIMIT
-            else:
-                lower, upper = FOOT_LIMIT
-            joint_range_usage_percent[name] = (
-                joint_excursions_deg.get(name, 0.0)
-                / math.degrees(upper - lower)
-                * 100.0
-            )
         velocity_clamp_counts = list(
             getattr(
                 self,
@@ -4483,7 +3859,6 @@ class VoltMotionController(Node):
                     gait_warning,
                     clamp_warning,
                     workspace_warning,
-                    stride_warning,
                     timing_warning,
                 )
                 if warning
@@ -4495,16 +3870,6 @@ class VoltMotionController(Node):
                 getattr(self, "use_sim_time", False)
             ),
             "gait_config_file": getattr(self, "gait_config_file", ""),
-            "fast_trot_config_file": getattr(
-                self,
-                "fast_trot_config_file",
-                "",
-            ),
-            "fast_trot_profile": (
-                "physical"
-                if self.hardware_mode
-                else "simulation"
-            ),
             "real_robot_profiles_file": getattr(
                 self,
                 "real_profiles_file",
@@ -4559,58 +3924,9 @@ class VoltMotionController(Node):
                 name: math.degrees(self.joint_acceleration_limit(index))
                 for index, name in enumerate(JOINT_NAMES)
             },
-            "fast_trot_tuning": fast_trot_tuning,
-            "fast_trot_presets": {
-                name: dict(values)
-                for name, values in self.gait_configs["fast_trot"][
-                    "presets"
-                ].items()
-            },
-            "requested_step_height": float(
-                fast_trot_tuning.get("step_height", 0.0)
+            "cycle_period": float(
+                debug.get("cycle_period", 0.0)
             ),
-            "achieved_step_height": float(
-                getattr(self, "fast_trot_achieved_step_height", 0.0)
-            ),
-            "requested_stride": requested_stride,
-            "planned_stride": float(debug.get("achieved_stride", 0.0)),
-            "achieved_stride": achieved_stride,
-            "signed_stride": signed_stride,
-            "stride_achievement_ratio": stride_ratio,
-            "stride_metric_valid": stride_metric_valid,
-            "stride_metric": "signed_body_x_near_straight",
-            "stance_grounded": stance_grounded,
-            "stance_max_ground_error": stance_ground_error,
-            "stance_ground_tolerance": float(
-                self.gait_configs["fast_trot"][
-                    "stance_ground_tolerance"
-                ]
-            ),
-            "configured_cycle_period": float(
-                debug.get("configured_cycle_period", 0.0)
-            ),
-            "current_cycle_period": float(
-                debug.get("current_cycle_period", 0.0)
-            ),
-            "phase_rate_scale": float(
-                debug.get("phase_rate_scale", 1.0)
-            ),
-            "phase_transition_hold": bool(
-                debug.get("phase_transition_hold", False)
-            ),
-            "current_swing_pair": debug.get(
-                "current_swing_pair",
-                "none",
-            ),
-            "maximum_joint_excursion_deg": float(
-                getattr(
-                    self,
-                    "fast_trot_max_joint_excursion_deg",
-                    0.0,
-                )
-            ),
-            "joint_excursions_deg": joint_excursions_deg,
-            "joint_range_usage_percent": joint_range_usage_percent,
             "joint_velocity_clamp_counts": dict(
                 zip(JOINT_NAMES, velocity_clamp_counts)
             ),
@@ -4688,7 +4004,6 @@ class VoltMotionController(Node):
             "ik_branch_continuous": bool(
                 getattr(self, "ik_branch_continuous", True)
             ),
-            "fast_trot_completed_cycles": completed_cycles,
             "feet": debug.get("feet", {}),
             "commanded_foot_xyz": dict(
                 getattr(self, "last_gait_feet", {})

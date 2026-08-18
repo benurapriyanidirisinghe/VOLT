@@ -59,8 +59,8 @@ diagnostic must all be true before a leased test can start.
 | B — SLOW SQUAT | Starts the finite `slow-squat` Cartesian diagnostic. All four commanded feet stay planted while the body lowers by at most 18 mm. |
 | C — SINGLE LEG LIFT | Starts `single-leg-lift` for the selected canonical leg, with at most 20 mm commanded lift. |
 | D — STEP ONE LEG | Starts `single-leg-step` for the selected leg, with at most 15 mm lift and 10 mm forward travel. Its valid duration starts at 6 s. |
-| E — SELECT SLOW CRAWL | Stops, then selects `diagnostic_crawl`. It does not start a finite diagnostic; wait for selection and then use minimal joystick input. |
-| F — SELECT SAFE TROT | Stops, then selects `real_safe_trot`. It does not start a finite diagnostic; wait for selection and then use minimal joystick input. |
+| E — SELECT AMBLE | Stops, then selects `amble`. It does not start a finite diagnostic; wait for selection and then use minimal joystick input. |
+| F — SELECT TROT | Stops, then selects `trot`. It does not start a finite diagnostic; wait for selection and then use minimal joystick input. |
 
 The GUI duration selector is 6–20 s and the leg choices are `front_left`,
 `front_right`, `rear_left`, and `rear_right`. B–D use validated JSON on
@@ -169,11 +169,11 @@ begin on the floor and do not jump directly to `REAL_NORMAL`:
 6. Use **D — STEP ONE LEG** separately for each leg at 6 s or longer. Again
    stop and inspect after each finite leased run.
 7. While fully stopped, load and **Apply** `REAL_DIAGNOSTIC`. Select **E —
-   SELECT SLOW CRAWL**, wait until `diagnostic_crawl` is active, then apply the
+   SELECT AMBLE**, wait until `amble` is active, then apply the
    smallest brief joystick command. Release, STOP, and wait for all commanded
    feet to settle.
 8. While fully stopped, load and **Apply** `REAL_SAFE`. Select **F — SELECT
-   SAFE TROT**, wait until `real_safe_trot` is active, then apply the smallest
+   TROT**, wait until `trot` is active, then apply the smallest
    brief joystick command. Release and STOP.
 9. Increase speed or one tuning variable only after clean complete cycles;
    record the applied profile and result each time. Never treat
@@ -205,18 +205,19 @@ Complete this checklist before enabling live hardware:
    entering the leg workspace.
 8. Stop unrelated VOLT stacks, GUIs, teleoperation nodes, emote players, and
    CLI publishers.
-9. Confirm the Nano runs the repository's protocol-2 firmware. Do not try
-   physical fast trot with `firmware_compatible=0`, a legacy generic handshake,
-   or the old 30 deg/s firmware image.
+9. Confirm the Nano runs the repository's protocol-2 firmware. Do not attempt
+   live walking with `firmware_compatible=0`, a legacy generic handshake,
+   or an older low-slew firmware image.
 10. Keep a second sourced terminal ready for the emergency command, while
     treating the physical power disconnect as the final stop.
 
 The current bridge accepts normal live motion only after a protocol-2
 capability report and ARM acknowledgement. It sends complete frames at no more
-than 30 Hz. The current physical fast-trot host limits are 55 deg/s for
-shoulders, 75 deg/s for upper legs, 90 deg/s for knees/feet, 90 deg/s overall,
-18 rad/s² acceleration, and 0.90 deg maximum command delta per 100 Hz
-controller update. Do not raise those values for a first test.
+than 30 Hz. The gait engine validates every gait configuration at load
+against its servo budgets — 80 deg/s commanded on loaded stance joints,
+190 deg/s on the unloaded swing leg, and 6500 deg/s² acceleration — beneath
+the firmware's 240 deg/s slew ceiling. Do not raise those values for a first
+test.
 
 ## Build and source
 
@@ -258,9 +259,8 @@ ros2 topic info /volt/joint_commands/motion --verbose
 
 Expected safety state is hardware disabled, dry-run true, serial disconnected,
 firmware disarmed, one intended publisher on each actuator-authority topic,
-`REAL_DIAGNOSTIC` active for the new real-hardware profile path, and
-`config/physical_fast_trot.yaml` reported only for the separate legacy fast
-trot path. Run every intended mode in dry-run before the matching live test.
+and `REAL_DIAGNOSTIC` active as the hardware profile. Run every intended
+mode in dry-run before the matching live test.
 Dry-run checks command generation and cleanup; it cannot check servo direction,
 load, power, contact, or mechanics.
 
@@ -288,8 +288,7 @@ Before each finite test:
 1. Confirm the stand and disconnect again.
 2. Confirm `PROTO=2`, `firmware_compatible=1`, serial connected, and no reset
    or duplicate-stack warning.
-3. Confirm the GUI reports hardware mode and `REAL_DIAGNOSTIC`; BENCH is
-   relevant only when deliberately testing the separate `fast_trot` path.
+3. Confirm the GUI reports hardware mode and `REAL_DIAGNOSTIC`.
 4. Keep input zero and use `ARM SYSTEM SAFELY` deliberately from the verified
    calibrated open-loop standing seed. The CLI will not ARM for you.
 5. Select `STAND`, wait for stable `STANDING`, send STOP, and wait for no
@@ -388,7 +387,7 @@ ros2 run volt_description volt_physical_tests.py \
 
 ### 5. Zero-stride trot
 
-Selects `fast_trot` and maintains the existing step-in-place heartbeat with
+Selects `trot` and maintains the existing step-in-place heartbeat with
 zero `/cmd_vel`.
 
 ```bash
@@ -400,7 +399,7 @@ ros2 run volt_description volt_physical_tests.py \
 
 ### 6. Slow creep
 
-Selects the conservative `spotmicro_video_walk` gait and requests 0.004 m/s
+Selects the conservative `amble` gait and requests 0.004 m/s
 forward for a finite interval.
 
 ```bash
@@ -410,15 +409,15 @@ ros2 run volt_description volt_physical_tests.py \
   --acknowledge-support-stand 'VOLT IS ON A SUPPORT STAND'
 ```
 
-### 7. Physical fast trot
+### 7. Trot at speed
 
-Selects `fast_trot` and requests 0.030 m/s forward. Hardware starts from the
-BENCH tuple unless the operator deliberately applied another stopped-state
-tuning.
+Selects `trot` and requests 0.030 m/s forward. The mode flag below is the
+retained historical CLI identifier; the gait it selects is the canonical
+`trot`, using whatever stopped-state profile the operator last applied.
 
 ```bash
 ros2 run volt_description volt_physical_tests.py \
-  --mode physical-fast-trot \
+  --mode trot-speed \
   --execute \
   --acknowledge-support-stand 'VOLT IS ON A SUPPORT STAND'
 ```
@@ -464,7 +463,7 @@ torque is unsafe.
 | `diagonal-pair-lift` | 10 s | 8 s | 20 s |
 | `zero-stride-trot` | 6 s | 3 s | 20 s |
 | `slow-creep` | 8 s | 5 s | 20 s |
-| `physical-fast-trot` | 6 s | 4 s | 20 s |
+| `trot-speed` | 6 s | 4 s | 20 s |
 
 Example of a valid finite override:
 
@@ -479,56 +478,14 @@ ros2 run volt_description volt_physical_tests.py \
 Longer duration is not a substitute for inspecting between runs. Stop early on
 any unexpected motion, sound, heat, smell, voltage behavior, or warning.
 
-## Passive diagnostic recorder
-
-Run the recorder in a separate sourced terminal. Its
-`hardware_enabled` parameter must remain false even while it observes a live
-bridge; that parameter ensures the recorder itself cannot enable hardware.
-
-```bash
-ros2 run volt_description volt_fast_trot_diagnostic.py --ros-args \
-  -p output_path:=/tmp/volt_fast_trot_runs \
-  -p hardware_enabled:=false
-```
-
-For a manually delimited recording:
-
-```bash
-ros2 topic pub --once /volt/fast_trot_diagnostic \
-  std_msgs/msg/String '{data: start}'
-
-ros2 topic pub --once /volt/fast_trot_diagnostic \
-  std_msgs/msg/String '{data: stop}'
-```
-
-Plot the reported CSV:
-
-```bash
-ros2 run volt_description volt_plot_fast_trot.py \
-  /tmp/volt_fast_trot_runs/volt_fast_trot_TIMESTAMP.csv \
-  --output /tmp/volt_fast_trot.pdf
-```
-
-Check per-leg phase, diagonal pairing, lift-before-transfer, touchdown,
-commanded stance height, requested versus signed commanded-FK stride,
-configured versus observed cycle period, canonical and calibrated command
-deltas, velocity/braking/acceleration/delta clamps, IK projections, branch
-continuity, workspace margin, serial frame rate, rejected/blocked frames, and
-duplicate publishers.
-
-These are command-path diagnostics. “Grounded,” “achieved stride,” body
-position, and joint tracking remain calculated or assumed in open-loop
-hardware mode.
-
-## Extended legacy CLI/fast-trot ladder
+## Extended CLI ladder
 
 The integrated GUI's recommended Stand → Push-up → single-leg lift →
-single-leg step → Slow Crawl → Real Safe Trot progression appears earlier and
-is the first path to follow. The longer ladder below is retained for the
-separate legacy CLI and physical `fast_trot` tools; it does not replace or
-accelerate the real-profile progression.
+single-leg step → Amble → Trot progression appears earlier and is the first
+path to follow. The longer ladder below uses only `volt_physical_tests.py`;
+it does not replace or accelerate the real-profile progression.
 
-Do not skip directly to WIDE or a fully unsupported floor run:
+Do not skip ahead to a fully unsupported floor run:
 
 1. Complete build/tests and every planned mode in hardware-disabled dry-run.
 2. With power off, inspect mechanics, calibration, both power systems, and
@@ -540,146 +497,56 @@ Do not skip directly to WIDE or a fully unsupported floor run:
    grounded before the other rises.
 6. Run unloaded `weight-shift`, then a partially loaded version only while the
    stand remains able to catch the complete robot.
-7. Apply BENCH while stopped. Run `zero-stride-trot`.
+7. Apply `REAL_DIAGNOSTIC` while stopped. Run `zero-stride-trot`.
 8. Run `slow-creep` at 0.004 m/s, first unloaded and then only with controlled
    partial foot contact.
-9. Run `physical-fast-trot` at its finite 0.030 m/s BENCH command while the
-   support stand remains installed.
-10. Review the diagnostic recording and power measurements after every stage.
-11. Only after all gates pass may the operator consider FLOOR TEST with the
-    stand/tether still carrying part of the load. WIDE comes last and never
-    applies automatically.
+9. Apply `REAL_SAFE` while stopped, then run the finite 0.030 m/s trot mode
+   while the support stand remains installed.
+10. Review the observed behavior and power measurements after every stage.
+11. Only after all gates pass may the operator consider partial floor contact
+    with the stand/tether still carrying part of the load. Unsupported floor
+    walking is a separate, later decision and never applies automatically.
 
 The test runner always requires the robot to remain on the support stand.
 Unsupported floor operation is outside this finite-test authorization and has
 not been physically validated.
 
-## One-variable-at-a-time sweep
+## One-variable-at-a-time tuning
 
-Start every sweep from a freshly applied BENCH tuple. Save the current YAML and
-record the exact controller-reported tuple, power measurements, surface, load
-support, and result. Change one conceptual variable, run one finite test,
-STOP/HOLD, inspect, and either keep that value or return to the preceding
-known-good value.
+There is no separate sweep helper or live tuning tuple. All stopped-state
+tuning goes through the GUI's Real Robot Tuning panel (or an equivalent
+complete `/volt/real_robot_tuning` transaction): load a profile, change one
+conceptual variable, Apply while fully stopped, run one finite support-stand
+test, STOP/HOLD, inspect, and either keep the value or return to the
+preceding known-good profile. Record the applied profile, power
+measurements, surface, load support, and result each time. Loading a
+different profile changes many fields together and is a stage transition,
+not a one-variable sweep.
 
-### Stopped-state sweep helper
+Every Apply is atomic and re-runs the gait engine's servo-budget sweep: a
+transaction whose commanded joint speeds would exceed 80 deg/s on loaded
+stance joints or 190 deg/s on the unloaded swing leg, or whose commanded
+accelerations would exceed 6500 deg/s², is rejected in full and changes
+nothing. If the controller rejects a value, restore the preceding value; do
+not defeat the check.
 
-`volt_fast_trot_sweep.py` plans or publishes only the four live tuning fields.
-It creates no motion, gait, owner, serial, physical-test, or joint-command
-publisher. A no-`--apply` run is the required first step and publishes nothing:
+Stop tuning when current rises materially, either rail sags, servos buzz or
+slow, vibration grows, contact becomes inconsistent, or any software
+limit/projection warning persists. Prefer reducing speed or stride when
+clamps persist; do not raise velocity, acceleration, calibration, pulse, or
+firmware limits to chase an aggressive cycle.
 
-```bash
-ros2 run volt_description volt_fast_trot_sweep.py \
-  --parameter step_height \
-  --values 0.029 0.030 0.031
-```
+## Authoritative configuration
 
-The hardware-mode controller must already be running so the helper can read
-the controller's actual config path and complete four-field baseline from
-`/volt/status`. It prints each candidate in full and rejects duplicate,
-non-finite, out-of-range, baseline-equal, or cross-field-infeasible values.
-Each run may contain one to eight points and may vary exactly one of:
-
-```text
-stride_scale
-step_height
-hardware_cycle_period
-hardware_speed_scale
-```
-
-For example, this no-publish BENCH stride plan remains within the unchanged
-BENCH period/speed envelope:
-
-```bash
-ros2 run volt_description volt_fast_trot_sweep.py \
-  --parameter stride_scale \
-  --values 0.55 0.60
-```
-
-Live application has a separate typed gate:
-
-```bash
-ros2 run volt_description volt_fast_trot_sweep.py \
-  --parameter step_height \
-  --values 0.029 0.030 0.031 \
-  --apply \
-  --acknowledge-hold-observe 'I WILL HOLD AND OBSERVE VOLT'
-```
-
-The helper fails closed unless status remains fresh and reports the physical
-profile, FAST TROT selected, MOTION ownership and authorization, stopped
-standing state, zero requested and filtered velocity, no pending gait/pose or
-physical test, all four legs in stance, no swing leg, and a complete echo of
-the expected preceding tuple. It waits for the controller to echo each point
-and observes the stopped state for 2 seconds by default.
-
-On successful completion, interruption, or an error after publication, it
-publishes the original baseline again and waits for its echo. Read the log and
-confirm that restore; do not assume it if confirmation failed. The helper does
-not retain the final point and does not exercise a gait. To evaluate one
-candidate physically, return to the manual sequence below: deliberately apply
-that single complete tuple while stopped, run one finite support-stand test,
-then STOP/HOLD and inspect it.
-
-Recommended order:
-
-1. Confirm stable stand, weight shift, each single-leg lift, and both diagonal
-   pair lifts.
-2. Keep forward stride at zero and verify trot timing and clean touchdown.
-3. Raise `step_height` only in 1 mm steps until toe drag clears; stop increasing
-   once clearance is reliable.
-4. Return to a stopped BENCH tuple. Increase live `stride_scale` by at most
-   0.05 per test while period, speed scale, and height remain fixed.
-5. Increase nominal gait frequency only by shortening
-   `hardware_cycle_period` by at most 0.02 s per test. If the controller rejects
-   the complete tuple as infeasible, restore the preceding tuple; do not defeat
-   the envelope check.
-6. If needed, change duty factor by 0.01 per YAML/relaunch iteration, keeping
-   `stance_ratio + swing_ratio = 1.0`.
-7. Change body height or stance width by at most 2 mm per YAML/relaunch
-   iteration, never both together.
-8. Adjust front or rear foot offset by at most 2 mm, one end at a time.
-9. Adjust liftoff or touchdown blend by at most 0.02, one at a time.
-10. Prefer reducing motion scale, speed, or stride when clamps persist. Do not
-    raise velocity, acceleration, calibration, pulse, or firmware limits to
-    chase an aggressive period.
-11. Stop the sweep when current rises materially, either rail sags, servos
-    buzz or slow, vibration grows, contact becomes inconsistent, the observed
-    period becomes erratic, or any software limit/projection warning persists.
-
-Loading a different preset changes four fields together and is a stage
-transition, not a one-variable sweep.
-
-## Parameter table
-
-The physical profile is
-`config/physical_fast_trot.yaml`. “YAML-only” means stop, HOLD/DISARM, edit the
-complete alias-consistent profile, rebuild/relaunch, and restart at BENCH. It
-does not mean the value is safe to change on an active node.
-
-| Parameter | Current value | Conservative sweep guidance | Interface |
-|---|---:|---|---|
-| `gait_frequency` | 1.470588 Hz base | Change the inverse period by at most 0.02 s per run; initial intended range is about 1.0–1.5 Hz | YAML alias; live control is `hardware_cycle_period` |
-| `stride_length` | 0.055 m raw | Prefer live `stride_scale` +0.05 steps; never exceed the 0.075 m Cartesian ceiling | YAML-only alias of `step_length_x` |
-| `step_height` | 0.036 m base, 0.028 m BENCH | 0.001 m per test; accepted live range 0.020–0.050 m | Live four-field tuple |
-| `duty_factor` | 0.62 | 0.01 per relaunch; remain in the conservative 0.58–0.68 region initially | YAML-only; update `stance_ratio` and complementary `swing_ratio` |
-| `body_height` | 0.188 m | 0.002 m per relaunch; avoid straight or deeply folded legs | YAML-only; match `0.200 + body_height_offset` |
-| `stance_width` | 0.104 m half-width | 0.002 m per relaunch; retain left/right symmetry | YAML-only |
-| `front_foot_offset` | 0.000 m | 0.002 m per relaunch | YAML-only |
-| `rear_foot_offset` | 0.000 m | 0.002 m per relaunch | YAML-only |
-| `touchdown_blend` | 0.20 | 0.02 per relaunch; each blend must stay 0.05–0.35 and their sum at most 0.70 | YAML-only |
-| `liftoff_blend` | 0.20 | 0.02 per relaunch; verify lift precedes transfer | YAML-only |
-| `joint_velocity_limit` | 90 deg/s overall | Do not increase during gait tuning; reduce in 5 deg/s steps if needed | YAML-only; match `hardware_joint_velocity_limit_deg_s` |
-| Per-joint velocity | 55 / 75 / 90 deg/s | Shoulder / upper-leg / knee-foot; do not raise for first tests | YAML-only |
-| `joint_acceleration_limit` | 18 rad/s² | Do not increase during gait tuning; reduce in small steps if impacts persist | YAML-only |
-| `command_smoothing` | 0.22 | 0.02 per relaunch; a larger alpha follows targets more directly and is less smoothing | YAML-only; match `joint_smoothing_alpha` |
-| `physical_motion_scale` | 0.75 | Reduce by at most 0.05 when necessary; do not increase first | YAML-only; match `hardware_stride_scale` |
-
-The stopped-state live request always contains all four fields:
-`stride_scale`, `step_height`, `hardware_cycle_period`, and
-`hardware_speed_scale`. Keep three unchanged to sweep the fourth. The
-controller rejects partial, out-of-range, active-motion, over-stride, or
-kinematically infeasible tuples.
+The two gaits are configured in the `gaits` section of
+`config/gait_controller.yaml`: per-gait cycle period, duty factor, step
+height, command limits, settle time, body sway, filtering, command
+acceleration, hardware speed scale, and the servo velocity/acceleration
+budgets. The stopped-state hardware profiles live in
+`config/real_robot_profiles.yaml`. Editing either file means stop,
+HOLD/DISARM, edit, rebuild/relaunch. Both paths re-run the servo-budget
+validation at load; an infeasible configuration refuses to load rather than
+being clipped by a downstream limiter.
 
 ## Power and wiring checks
 
@@ -773,24 +640,25 @@ leg workspace to save a software log.
 
 Runtime rollback:
 
-1. STOP and wait for the current airborne pair to lower.
-2. Confirm `LOADED_HOLD` or otherwise settled status.
-3. Apply BENCH while stopped.
-4. Confirm the returned tuple is `0.50`, `0.028`, `0.80`, `0.25`.
+1. STOP and wait for any airborne foot to lower.
+2. Confirm a settled, stopped status with four stance feet.
+3. Load and Apply `REAL_DIAGNOSTIC` while stopped.
+4. Confirm `/volt/status` echoes the applied profile and values.
 5. If uncertain, HOLD, DISARM, disconnect servo power, and return to dry-run.
 
 Configuration rollback:
 
 1. Keep servo power disconnected.
-2. Restore the complete known-good `config/physical_fast_trot.yaml` from the
-   user's saved copy or chosen version-control revision.
+2. Restore the complete known-good `config/gait_controller.yaml` and
+   `config/real_robot_profiles.yaml` from the user's saved copy or chosen
+   version-control revision.
 3. Do not mix values from two revisions or restore servo calibration as part
    of a gait-only rollback.
-4. Rebuild/relaunch and repeat dry-run, stand, single-leg, pair, zero-stride,
-   and BENCH gates.
+4. Rebuild/relaunch and repeat the dry-run, stand, single-leg, pair,
+   zero-stride, and `REAL_DIAGNOSTIC` gates.
 
-The simulation profile is separate in `config/gait_controller.yaml`; reverting
-the physical file must not require changing simulation gait values.
+The servo-budget validation re-runs whenever a restored configuration loads;
+a file that fails it refuses to load and must be corrected, not forced.
 
 ## Remaining risks
 
@@ -806,7 +674,7 @@ the physical file must not require changing simulation gait values.
   not delivered motion or torque.
 - HOLD/DISARM retain the last PWM target; DISABLE or power removal may cause
   collapse.
-- Passing every support-stand test does not validate unsupported fast trot on
+- Passing every support-stand test does not validate unsupported walking on
   the floor.
 
 Record these limitations with every result. Do not report a simulation,

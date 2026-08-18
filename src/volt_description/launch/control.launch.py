@@ -17,16 +17,9 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     hardware_mode = LaunchConfiguration("hardware_mode")
     open_loop_hardware = LaunchConfiguration("open_loop_hardware")
-    physical_fast_trot_config_file = LaunchConfiguration(
-        "physical_fast_trot_config_file"
-    )
     real_robot_profiles_file = LaunchConfiguration("real_robot_profiles_file")
     emote_config_file = LaunchConfiguration("emote_config_file")
     enable_physical_tests = LaunchConfiguration("enable_physical_tests")
-    fast_trot_diagnostic = LaunchConfiguration("fast_trot_diagnostic")
-    fast_trot_diagnostic_output = LaunchConfiguration(
-        "fast_trot_diagnostic_output"
-    )
     config_file = PathJoinSubstitution([
         FindPackageShare("volt_description"),
         "config",
@@ -67,14 +60,11 @@ def generate_launch_description():
                     PythonExpression([
                         "100.0 if '",
                         hardware_mode,
-                        "'.lower() == 'true' else 200.0",
+                        "'.lower() == 'true' else 100.0",
                     ]),
                     value_type=float,
                 ),
                 "gait_config_file": config_file,
-                "physical_fast_trot_config_file": (
-                    physical_fast_trot_config_file
-                ),
                 "real_robot_profiles_file": real_robot_profiles_file,
                 "emote_config_file": emote_config_file,
                 "enable_physical_tests": ParameterValue(
@@ -97,23 +87,6 @@ def generate_launch_description():
         executable="volt_control_gui.py",
         output="screen",
         condition=IfCondition(use_gui),
-    )
-
-    diagnostic = Node(
-        package="volt_description",
-        executable="volt_fast_trot_diagnostic.py",
-        name="volt_fast_trot_diagnostic",
-        output="screen",
-        condition=IfCondition(fast_trot_diagnostic),
-        parameters=[{
-            "output_path": fast_trot_diagnostic_output,
-            "auto_start": True,
-            "hardware_enabled": False,
-            "use_sim_time": ParameterValue(
-                use_sim_time,
-                value_type=bool,
-            ),
-        }],
     )
 
     return LaunchDescription([
@@ -146,17 +119,6 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            "physical_fast_trot_config_file",
-            default_value=PathJoinSubstitution([
-                FindPackageShare("volt_description"),
-                "config",
-                "physical_fast_trot.yaml",
-            ]),
-            description=(
-                "Physical fast-trot overlay used only when hardware_mode is true"
-            ),
-        ),
-        DeclareLaunchArgument(
             "real_robot_profiles_file",
             default_value=PathJoinSubstitution([
                 FindPackageShare("volt_description"),
@@ -181,18 +143,7 @@ def generate_launch_description():
                 "Enable finite physical tests (hardware mode still required)"
             ),
         ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic",
-            default_value="false",
-            description="Passively record fast-trot status and canonical commands",
-        ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic_output",
-            default_value="",
-            description="Optional diagnostic CSV path or output directory",
-        ),
         command_router,
         controller,
         gui,
-        diagnostic,
     ])

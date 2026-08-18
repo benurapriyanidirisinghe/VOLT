@@ -25,7 +25,7 @@ from volt_physical_tests import (  # noqa: E402
     DIAGONAL_PAIRS,
     DIAGONAL_PAIR_LIFT,
     EMERGENCY_STOP,
-    PHYSICAL_FAST_TROT,
+    TROT_SPEED_TEST,
     SINGLE_LEG_LIFT,
     STAND,
     SUPPORT_STAND_ACKNOWLEDGEMENT,
@@ -153,7 +153,7 @@ class CliSafetyContractTests(unittest.TestCase):
         with self.assertRaises(PhysicalTestError):
             physical_test_request_json(
                 "start",
-                PHYSICAL_FAST_TROT,
+                TROT_SPEED_TEST,
                 6.0,
                 "request_1234",
             )
@@ -169,8 +169,6 @@ class CliSafetyContractTests(unittest.TestCase):
         status = {
             "hardware_mode": True,
             "use_sim_time": False,
-            "fast_trot_profile": "physical",
-            "fast_trot_config_file": "/tmp/physical_fast_trot.yaml",
             "physical_tests_enabled": True,
             "command_owner": "MOTION",
             "motion_authorized": True,
@@ -193,7 +191,6 @@ class CliSafetyContractTests(unittest.TestCase):
         for name, unsafe in (
             ("hardware_mode", False),
             ("use_sim_time", True),
-            ("fast_trot_profile", "simulation"),
             ("physical_tests_enabled", False),
             ("command_owner", "HOLD"),
             ("motion_authorized", False),

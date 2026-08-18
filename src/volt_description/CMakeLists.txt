@@ -14,7 +14,7 @@ install(
 )
 
 install(
-  FILES CONTROL_GUI.md EMOTES.md FAST_TROT.md PHYSICAL_TESTS.md SERVO_CALIBRATION.md THIRD_PARTY_NOTICES.md
+  FILES CONTROL_GUI.md EMOTES.md PHYSICAL_TESTS.md SERVO_CALIBRATION.md THIRD_PARTY_NOTICES.md
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -44,8 +44,6 @@ install(
     scripts/stand_up.py
     scripts/volt_control_gui.py
     scripts/volt_emote_player.py
-    scripts/volt_fast_trot_diagnostic.py
-    scripts/volt_fast_trot_sweep.py
     scripts/volt_gait_controller.py
     scripts/volt_joint_command_router.py
     scripts/volt_joint_test_gui.py
@@ -53,7 +51,6 @@ install(
     scripts/volt_joint_mapping_test.py
     scripts/volt_motion_controller.py
     scripts/volt_physical_tests.py
-    scripts/volt_plot_fast_trot.py
     scripts/volt_run_all.py
     scripts/volt_servo_calibration.py
     scripts/volt_servo_calibration_gui.py
@@ -103,16 +100,6 @@ add_test(
 )
 
 add_test(
-  NAME test_spot_walk
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_spot_walk.py
-)
-
-add_test(
-  NAME test_spotmicro_video_walk
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_spotmicro_video_walk.py
-)
-
-add_test(
   NAME test_motion_controller
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_motion_controller.py
 )
@@ -120,21 +107,6 @@ add_test(
 add_test(
   NAME test_serial_bridge
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_serial_bridge.py
-)
-
-add_test(
-  NAME test_fast_trot_diagnostic
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_fast_trot_diagnostic.py
-)
-
-add_test(
-  NAME test_fast_trot
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_fast_trot.py
-)
-
-add_test(
-  NAME test_fast_trot_sweep
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_fast_trot_sweep.py
 )
 
 add_test(

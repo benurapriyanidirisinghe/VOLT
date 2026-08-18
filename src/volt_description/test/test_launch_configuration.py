@@ -298,7 +298,7 @@ class ScriptInstallationTests(unittest.TestCase):
         "volt_servo_calibration.py",
         "volt_run_all.py",
         "volt_physical_tests.py",
-        "volt_fast_trot_sweep.py",
+        "volt_gait_controller.py",
     )
 
     def test_required_scripts_are_executable(self):

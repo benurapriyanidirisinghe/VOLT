@@ -3,10 +3,10 @@
 VOLT is a ROS 2 Humble 12-joint quadruped stack with one canonical joint-command
 path for Gazebo Sim and the physical Arduino Nano/PCA9685 robot. It includes a
 PyQt control GUI, closed-form VOLT kinematics, a command-ownership router,
-calibrated serial output, diagonal trot modes, and a conservative
-`spotmicro_video_walk` crawl that reproduces the slow, deliberate
-body-shift-and-step style of the reference video. It is adapted from the
-walking concepts in
+calibrated serial output, and a single walking engine with two servo-budgeted
+gaits: a two-beat diagonal `trot` and a conservative four-beat `amble` that
+always keeps at least three feet planted. Early walking concepts were adapted
+from
 [mike4192/spotMicro](https://github.com/mike4192/spotMicro).
 The current hardware workflow adds stopped-state real-robot profiles,
 controller-owned Cartesian emotes, two mirrored WS2812B face strips with
@@ -37,7 +37,7 @@ Do not migrate this path to `gazebo_ros`, `spawn_entity.py`, or
 `libgazebo_ros2_control.so`.
 
 `launch/gazebo.launch.py` is retained only as a legacy Gazebo Classic launcher.
-It is not used by `spotmicro_video_walk` or `spot_walk`, is not included by the
+It is not used by the walking integration, is not included by the
 principal launch, and is not the supported backend for this integration.
 
 The active simulator arrangement is:
@@ -60,17 +60,21 @@ and from `--symlink-install`.
 ### Optional TD-8130MG simulation profile
 
 Ignition defaults to `actuator_profile:=simulation`, preserving the established
-simulation behavior. To model the real servo's conservative speed/effort
-envelope in Ignition, select the optional `td8130mg` xacro profile:
+simulation behavior. To model the real servo under load in Ignition, select
+the optional `td8130mg` xacro profile:
 
 ```bash
 ros2 launch volt_description ignition.launch.py \
   gui:=true use_sim_time:=true actuator_profile:=td8130mg
 ```
 
-It keeps shoulder velocity at 2.0 rad/s (about 114.6 deg/s), limits upper-leg
-and foot joints to 2.0944 rad/s (120 deg/s), changes effort from 20 to 6, and
-uses damping/friction 0.9/0.15 instead of 0.6/0.1. The unified runner accepts
+It caps every joint's velocity at 4.1888 rad/s — the firmware's 240 deg/s
+slew ceiling (the TD-8130MG free speed is about 375 deg/s, so firmware is the
+binding limit) — and caps effort at a derated 2.8 N·m stall torque. The
+active Gazebo Sim path uses a stiff `gz_ros2_control` position gain (18.0),
+so with this profile the effort clamp — load — rather than an artificially
+soft tracking gain is what slows a joint, and Gazebo reproduces
+load-dependent tracking lag. The unified runner accepts
 `--actuator-profile td8130mg`, including with `--physical` for its Ignition
 shadow model.
 
@@ -424,15 +428,15 @@ owner to `HOLD`, and asks the Arduino to hold.
 
 ## Real-hardware profiles and atomic tuning
 
-`config/real_robot_profiles.yaml` supplies four complete profiles:
+`config/real_robot_profiles.yaml` supplies four complete profiles, each
+targeting one of the two canonical gaits:
 
-- `SIMULATION`: unchanged 5.20 s `spotmicro_video_walk` behavior
-- `REAL_DIAGNOSTIC`: 2.00 s, 80%-duty one-leg-at-a-time
-  `diagnostic_crawl`, 35 mm stride and 40 mm clearance
-- `REAL_SAFE`: 1.20 s load-safe `real_safe_trot`, 35 mm stride and 36 mm
-  clearance
-- `REAL_NORMAL`: a later 0.90 s, 50 mm `real_safe_trot` reference; it is not
-  the first physical profile
+- `SIMULATION`: the proven 1.10 s simulator `trot`
+- `REAL_DIAGNOSTIC`: 2.40 s, 80%-duty one-leg-at-a-time `amble`, 30 mm
+  stride and 22 mm clearance; the first-floor-test profile
+- `REAL_SAFE`: 1.20 s load-safe `trot`, 45 mm stride and 24 mm clearance
+- `REAL_NORMAL`: a later 1.05 s, 55 mm `trot` reference; it is not the first
+  physical profile
 
 Hardware mode starts at `REAL_DIAGNOSTIC`; simulation starts at `SIMULATION`.
 The GUI keeps `SIMULATION` visible but disables its value editors plus Apply
@@ -446,7 +450,9 @@ local only. Apply sends one complete, correlated JSON transaction on
 The controller applies nothing unless the robot is fully stopped with neutral
 velocity and no gait, transition, step, diagnostic, or emote active. It checks
 schema/ranges and preflights stance and swing extrema through IK; projection
-or joint clamping rejects the entire transaction. `/volt/status` echoes the
+or joint clamping rejects the entire transaction. Applying a profile also
+re-runs the gait engine's servo-budget sweep, so a profile cannot demand
+joint speeds the TD-8130MG cannot deliver under load. `/volt/status` echoes the
 same request ID with `applied` or `rejected`, a message, the effective profile,
 complete values, bounds, and joint limits. This makes body, gait, and
 conditioning changes atomic rather than a series of partially live edits.
@@ -627,8 +633,8 @@ With `enable_physical_tests:=true`, the Hardware Gait Diagnostic panel offers:
 - B: finite leased Slow Squat
 - C: finite leased Single Leg Lift
 - D: finite leased Step One Leg
-- E: stop and select `diagnostic_crawl`
-- F: stop and select `real_safe_trot`
+- E: stop and select `amble`
+- F: stop and select `trot`
 
 B–D renew validated `/volt/physical_test` JSON every 200 ms. Loss of a matching
 keepalive for 750 ms causes a smooth one-second commanded return. E/F select a
@@ -638,225 +644,117 @@ or firmware ARM, so wait for the commanded return and then use HOLD/DISARM as
 required. Full commands and the support-stand ladder are in
 [PHYSICAL_TESTS.md](src/volt_description/PHYSICAL_TESTS.md).
 
-## Walking modes
+## Walking
 
-The GUI starts on `spotmicro_video_walk` at a 20% speed limit with a zero
-motion command. Available canonical gait names are:
+Walking is one engine, `scripts/volt_gait_controller.py`, with exactly two
+gaits. The GUI offers two gait buttons — `AMBLE` (the default) and `TROT` —
+plus the retained `STEP IN PLACE`, and starts at a 20% speed limit with a
+zero motion command.
 
-- `spotmicro_video_walk`: slow video-style stable crawl with explicit support
-  verification, touchdown, and settle states
-- `spot_walk`: conservative, one-foot-at-a-time statically stable crawl,
-  shown in the GUI as **VOLT STABLE WALK**
-- `diagnostic_crawl`: real-hardware profile crawl used by `REAL_DIAGNOSTIC`
-- `real_safe_trot`: bounded real-hardware diagonal gait used by `REAL_SAFE`
-  and `REAL_NORMAL`
-- `legacy_walk`: the original VOLT walk configuration, preserved explicitly
-- `amble`: the existing quasi-static amble
-- `slow_trot`, `normal_trot`, `fast_trot`: existing world-locked diagonal
-  phase trots
+- `trot` is a two-beat diagonal gait: `front_left + rear_right` and
+  `front_right + rear_left` move half a cycle apart. Its 0.58 duty factor
+  keeps two short four-foot support windows per cycle for load transfer
+  between the diagonal pairs. The cycle is 1.1 s and the full-command
+  forward speed is 0.12 m/s.
+- `amble` is a four-beat lateral-sequence walk: `rear_left`, `front_left`,
+  `rear_right`, and `front_right` each begin a quarter cycle apart, so each
+  hind foot is followed by the same-side front foot. Its 0.76 duty factor
+  keeps at least three feet planted at all times, and a small lateral body
+  sway leans the body away from whichever side is swinging. The cycle is
+  2.0 s and the full-command forward speed is 0.05 m/s. `amble` is the
+  conservative first-test gait.
 
-For backward compatibility, `walk` resolves through the explicit alias table
-to `spotmicro_video_walk`, and status reports that canonical name. The
-pre-existing `spot_walk` remains independently selectable. The legacy `trot`
-alias resolves to `normal_trot`. There is no duplicate `spot_trot`: upstream
-did not provide a meaningfully different trot worth duplicating, and the
-existing VOLT trots already retain the required diagonal pairs:
+### Gait aliases
 
-```text
-Pair A: front_left + rear_right
-Pair B: front_right + rear_left, one half-cycle after Pair A
-```
+Every historical gait name remains accepted on `/volt/gait`, but only as an
+alias onto one of the two canonical gaits: the old walk and crawl names
+resolve to `amble`, and every old trot variant resolves to `trot`. Status
+always reports the canonical name, so saved profiles, older client messages,
+and muscle memory keep working without separate gait implementations.
 
-The tuned full-scale forward envelopes are 0.090 m/s at 1.45 Hz for slow and
-0.130 m/s at 1.80 Hz for normal. `fast_trot` is now a separate Cartesian
-physical-trot profile: its configured sweep is 55 mm, simulation period is
-0.42 s, and hardware starts with the BENCH preset at a 0.75 s period and
-20.625 mm full-command effective stride. Those periods are requested clock
-rates: a downstream tracking governor stretches the complete Cartesian/body
-clock when the velocity/acceleration-limited command falls behind, and a
-1-degree endpoint gate prevents an airborne foot from entering scheduled
-stance. Status reports the observed period and only counts signed
-touchdown-to-liftoff stride when commanded stance stays within 2 mm of ground.
-The GUI can deliberately request the FLOOR TEST and WIDE presets only while
-stopped. See
-[FAST_TROT.md](src/volt_description/FAST_TROT.md) for its limits, diagnostics,
-and raised-test sequence. A trot is not the first recommended physical gait.
+### Servo-budget contract
 
-### `spotmicro_video_walk` behavior
+The engine validates every gait configuration when it is loaded — and again
+whenever a real-robot profile is applied — by numerically sweeping one full
+cycle at that gait's maximum command through the real IK. It refuses to load
+a configuration whose commanded joint speeds exceed 80 deg/s on loaded
+stance joints or 190 deg/s on the unloaded swing leg (the firmware slew
+ceiling is 240 deg/s), or whose commanded accelerations exceed 6500 deg/s².
 
-This is the video-matched, deliberately slow stable crawl. Each leg operation
-passes through `SHIFT`, `VERIFY_SUPPORT`, `LIFT_AND_SWING`, `TOUCHDOWN`, and
-`SETTLE`; completing a shift timer alone never authorizes lift. The
-controller's commanded-trajectory completion and joint tracking error provide
-the initial support/touchdown checks until contact sensors are available.
+The budgets differ per phase because of the TD-8130MG's speed–torque curve:
+the swing leg is unloaded and carries only its own inertia, so its servos
+run near their ~375 deg/s free speed, while stance joints carry the body but
+rotate slowly. A configuration that loads is therefore a configuration the
+servos can physically execute; no downstream limiter reshapes the walking
+trajectory afterwards.
 
-The eight principal phases and VOLT body-shift targets are:
+### Trajectory shape
 
-| Phase | Body target (+x forward, +y robot-left) | Swing |
-|---:|---|---|
-| 0 | front-left: `(+0.020, +0.018) m` | none; verify support |
-| 1 | hold front-left | `rear_right` |
-| 2 | back-left: `(-0.010, +0.018) m` | none; verify support |
-| 3 | hold back-left | `front_right` |
-| 4 | front-right: `(+0.020, -0.018) m` | none; verify support |
-| 5 | hold front-right | `rear_left` |
-| 6 | back-right: `(-0.010, -0.018) m` | none; verify support |
-| 7 | hold back-right | `front_left` |
+During stance, a planted foot holds a fixed world point while the integrated
+body pose moves over it, so commanded stance feet cannot skate by
+construction. Swing transfer uses a smoothstep horizontal blend with a sin²
+vertical lift, both with zero endpoint velocity. The touchdown target is
+frozen in the world frame when the foot lifts, so command changes never jerk
+an airborne foot.
 
-Thus the lift order is `rear_right → front_right → rear_left → front_left`;
-only one foot lifts, all four feet remain planted during shifts, and the other
-three world-locked footholds support each swing. The requested body target is
-projected inside the three-foot support region with its configured margin. If
-the region is invalid or the commanded shift has not reached its threshold,
-`lift_allowed` remains false and the warning is published instead of lifting.
+### Configuration
 
-Swing is generated in Cartesian foot space using a zero-endpoint-velocity
-horizontal blend and smooth rounded vertical bump. The 28 mm default clearance
-is tunable, as are timing, foothold bounds, support shifts, stance offset, and
-simulation/hardware time scales. A stop or expired command completes touchdown
-and settle, centres the body, and leaves all feet planted. Switching gaits
-follows that same grounded transition and then waits for a fresh non-zero
-command.
+The authoritative tuning is the `gaits` section of
+`src/volt_description/config/gait_controller.yaml`. The motion controller
+runs at 100 Hz everywhere, and the GUI consumes the effective limits
+published in `/volt/status` instead of duplicating them. Both gaits carry
+the same keys:
 
-The `/volt/status` fields specific to verification include `phase_index`,
-`phase_name`, `body_shift_target_x/y`, `shift_completion`,
-`support_polygon_valid`, `lift_allowed`, `projected_targets`,
-`clamped_joints`, joint tracking error, and the current warning. The GUI shows
-these fields alongside requested/active/pending gait, command ownership, and
-Arduino state.
+| Key | `trot` | `amble` |
+|---|---:|---:|
+| `cycle_period` | 1.1 s | 2.0 s |
+| `duty_factor` | 0.58 | 0.76 |
+| `step_height` | 0.024 m | 0.020 m |
+| `max_x` / `max_y` | 0.12 / 0.05 m/s | 0.05 / 0.03 m/s |
+| `max_yaw` | 0.50 rad/s | 0.30 rad/s |
+| `settle_time` | 0.6 s | 0.8 s |
+| `body_sway_y` | 0.0 m | 0.012 m |
+| `body_height_offset` | 0.0 m | 0.0 m |
+| `velocity_filter_alpha` | 0.30 | 0.25 |
+| `command_acceleration` | 0.25 | 0.15 |
+| `hardware_speed_scale` | 0.80 | 0.85 |
+| `joint_velocity_limit_deg_s` | 190 | 190 |
+| `joint_acceleration_limit_deg_s2` | 6500 | 6500 |
+| `stance_velocity_budget_deg_s` | 80 | 80 |
+| `swing_velocity_budget_deg_s` | 190 | 190 |
 
-### `spotmicro_video_walk` configuration
+An edited configuration that breaks the servo budget is refused at load; do
+not respond by raising the budget values. These are conservative initial
+values, not a declaration that an untested physical robot is safe. Start the
+raised physical test at only 10–20% on the GUI speed slider.
 
-The initial profile in `config/gait_controller.yaml` is intentionally slow:
-
-| Parameter | Initial value |
-|---|---:|
-| `full_cycle_duration` | 5.20 s |
-| `shift_duration` / `support_verify_duration` | 0.38 / 0.08 s |
-| `swing_duration` / `settle_duration` | 0.68 / 0.16 s |
-| `step_height` | 0.028 m |
-| `max_step_x` / `max_step_y` / `max_yaw_step` | 0.035 m / 0.015 m / 0.10 rad |
-| `forward_body_shift` / `rearward_body_shift` | 0.020 / 0.010 m |
-| `lateral_body_shift` / `support_margin` | 0.018 / 0.012 m |
-| `shift_completion_threshold` | 0.92 |
-| `gait_body_height_offset` / `body_bob_amplitude` | -0.010 / 0.001 m |
-| `simulation_time_scale` / `hardware_time_scale` | 1.0 / 1.20 |
-| `hardware_speed_scale` | 0.20 |
-
-The hardware time scale makes the same phase trajectory 20% slower, while the
-separate 20% hardware speed scale caps command amplitude. These are
-conservative starting values, not evidence that the physical robot has been
-tested.
-
-### `spot_walk` behavior
-
-The upstream-derived lift order is:
-
-```text
-rear_right → front_right → rear_left → front_left
-```
-
-One complete cycle has eight alternating phases:
-
-| Phase | Action |
-|---:|---|
-| 0 | Shift the body projection into the three-foot support region before `rear_right` |
-| 1 | Swing `rear_right`; the other three feet remain in stance |
-| 2 | Shift before `front_right` |
-| 3 | Swing `front_right`; the other three feet remain in stance |
-| 4 | Shift before `rear_left` |
-| 5 | Swing `rear_left`; the other three feet remain in stance |
-| 6 | Shift before `front_left` |
-| 7 | Swing `front_left`; the other three feet remain in stance |
-
-The body frame is VOLT's convention: +x forward, +y robot-left, and +z up.
-VOLT's URDF, link lengths, nominal feet, joint limits, and IK remain
-authoritative; upstream Spot Micro geometry and servo conventions are not
-used. The studied upstream kinematics use x forward, y up, and z
-robot-right, so the conceptual point mapping is
-`(x_VOLT, y_VOLT, z_VOLT) = (x_upstream, -z_upstream, y_upstream)`.
-Upstream positive lateral/yaw sense is correspondingly opposite the ROS/VOLT
-sense; the implementation preserves VOLT signs instead of copying upstream
-commands.
-
-Before each lift, the controller forms a support triangle from the other three
-world-locked feet. It selects a bounded body x/y shift toward that support
-region, adds conservative travel anticipation, and projects the result inside
-the triangle with the configured margin. The support shift completes before
-the next control sample is classified as airborne. Support shifts are body
-translations, not servo-angle offsets.
-
-The support calculation constrains the sum of the gait shift and the
-operator-requested body x/y offset. If an extreme offset cannot be countered
-within the configured shift bounds, only its unsafe remainder is temporarily
-clipped during that single-foot support phase, then restored while all four
-feet settle.
-
-At lift-off, the next foothold is frozen in the world frame. Swing x/y uses a
-quintic blend, and z uses a smooth lift/touchdown bump; both have zero endpoint
-velocity and acceleration. During swing, the other three feet stay locked in
-the world frame and are transformed back into the moving body frame before
-VOLT IK. This reduces commanded foot skating without changing the robot's
-geometry.
-
-`spot_walk` supports explicit step-in-place, slow forward/reverse travel,
-conservative yaw, and limited lateral travel. Simultaneous lateral and yaw
-commands are automatically reduced when their normalized combination becomes
-too large.
+With the `td8130mg` actuator profile, walking has been verified in Gazebo
+Ignition: a 0.10 m/s commanded trot achieved about 0.076 m/s with roll and
+pitch p95 below 2.5°, height sigma near 0.3 mm, and no falls. That is
+simulation evidence only, not physical validation.
 
 ### Stopping and switching gaits
 
-A zero/expired velocity command or normal STOP request does not reset a foot in
-midair:
+A zero/expired velocity command or normal STOP request does not reset a foot
+in midair: an airborne foot finishes touchdown first, and all feet then
+return smoothly to nominal stance over the gait's settle time.
 
-- During a support shift, no new foot is lifted; the controller begins
-  settling.
-- During a swing, that foot finishes touchdown first.
-- All feet then return smoothly to nominal stance over `settle_duration`.
+A safety stop is latched. After a stop request or command timeout, the
+engine stays stopped even if the joystick is still held; the motion
+controller releases the forced-stop latch only after observing a truly
+neutral command, and movement then requires a fresh non-zero command.
 
 An owner change to `HOLD` or `DISABLED` is the immediate emergency boundary:
-the router retains its last valid pose, so it can freeze an airborne foot. For
-a planned stop, send `STOP`, wait for status to show four stance feet, and only
-then change owner to `HOLD`.
+the router retains its last valid pose, so it can freeze an airborne foot.
+For a planned stop, send `STOP`, wait for status to show four stance feet,
+and only then change owner to `HOLD`.
 
 When a different gait is selected during motion, it becomes `pending_gait`.
-The controller ramps velocity toward zero, completes any active swing, grounds
-all feet, settles, and only then activates the requested gait. Movement does
-not resume until a new velocity command arrives. The GUI and `/volt/status`
-show the requested, active, and pending names throughout the transition.
-
-## `spot_walk` configuration
-
-The authoritative tuning is
-`src/volt_description/config/gait_controller.yaml`. Do not duplicate these
-limits in the GUI; the controller publishes effective limits in `/volt/status`.
-
-| Parameter | Initial value | Meaning |
-|---|---:|---|
-| `cycle_period` | 4.80 s | Four complete shift/swing pairs |
-| `support_shift_duration` | 0.60 s | Body shift time before each lift |
-| `swing_duration` | 0.60 s | Time for one foot swing |
-| `step_height` | 0.014 m | Swing clearance |
-| `maximum_step_x` | 0.028 m | Fore/aft foothold bound |
-| `maximum_step_y` | 0.010 m | Lateral foothold bound |
-| `maximum_yaw_rate` | 0.14 rad/s | Full-scale yaw limit |
-| `body_shift_x` | 0.012 m | Maximum fore/aft support shift |
-| `body_shift_y` | 0.015 m | Maximum lateral support shift |
-| `support_margin` | 0.004 m | Requested inset; infeasible nominal-triangle values are rejected |
-| `touchdown_lead` | 0.50 | Stance-time fraction used for foothold look-ahead |
-| `settle_duration` | 0.80 s | Return-to-nominal time after stopping |
-| `velocity_deadband` | 0.002 | Normalized command activity treated as zero |
-| `command_acceleration` | 0.08 | Conservative command ramp parameter |
-| `velocity_filter_alpha` | 0.18 | Velocity low-pass blend |
-| `joint_smoothing_alpha` | 0.10 | Stable-walk joint smoothing |
-| `maximum_body_roll` | 0.08 rad | Stable-walk body-pose bound |
-| `maximum_body_pitch` | 0.08 rad | Stable-walk body-pose bound |
-| `simulation_speed_scale` | 1.00 | Simulation profile scale |
-| `hardware_speed_scale` | 0.25 | Maximum initial hardware profile scale |
-
-These are conservative initial values, not a declaration that an untested
-physical robot is safe. Start the raised physical test at only 10–20% on the
-GUI speed slider.
+The controller ramps velocity toward zero, completes any active swing,
+grounds all feet, settles, and only then activates the requested gait.
+Movement does not resume until a new velocity command arrives. The GUI and
+`/volt/status` show the requested, active, and pending names throughout the
+transition.
 
 ## Time behavior
 
@@ -925,7 +823,7 @@ Arduino.
    `/volt/serial_status`.
 4. Press `ENABLE MOTION`, then confirm the router receives the documented,
    firmware-aligned 12-joint `WALK_POSE` (`pose_valid=1`).
-5. Select `VOLT WALK`, stand through the controlled transition,
+5. Select `AMBLE`, stand through the controlled transition,
    press STOP, and use explicit step-in-place at 10–20%.
 6. Inspect the bridge's `Dry-run conversion` table. Each row shows the
    canonical joint name, ROS radians, calibrated degrees, PCA channel, and any
@@ -953,10 +851,10 @@ outputs disabled. Pressing ARM is a separate deliberate action.
 6. Run **C — SINGLE LEG LIFT** separately for all four canonical legs,
    stopping and inspecting between runs.
 7. Run **D — STEP ONE LEG** separately for all four legs at 6 s or longer.
-8. Stop fully, load and Apply `REAL_DIAGNOSTIC`, use **E — SELECT SLOW CRAWL**,
-   wait for `diagnostic_crawl`, then give the smallest brief joystick input.
-9. Stop fully, load and Apply `REAL_SAFE`, use **F — SELECT SAFE TROT**, wait
-   for `real_safe_trot`, then give the smallest brief joystick input.
+8. Stop fully, load and Apply `REAL_DIAGNOSTIC`, use **E — SELECT AMBLE**,
+   wait for `amble`, then give the smallest brief joystick input.
+9. Stop fully, load and Apply `REAL_SAFE`, use **F — SELECT TROT**, wait
+   for `trot`, then give the smallest brief joystick input.
 10. Increase speed or one tuning variable only after clean complete cycles.
     Never jump automatically to `REAL_NORMAL`.
 11. End with STOP, wait for every commanded foot to settle, then HOLD and
@@ -1078,7 +976,7 @@ exit after activating their controllers.
 
 ## Current limitations
 
-- `spot_walk` is a conservative open-loop commanded gait, not a full dynamic
+- Both gaits are conservative open-loop commanded gaits, not a full dynamic
   stability controller. Support is estimated from commanded foot geometry;
   there is no measured center-of-mass, force, slip, or terrain feedback.
 - World-locked stance targets reduce commanded skating, but cannot guarantee
@@ -1093,20 +991,20 @@ exit after activating their controllers.
   motion controller publishes stationary poses. Treat process supervision and
   the accessible servo-power disconnect as required safeguards; a future
   dedicated GUI ownership heartbeat/lease would also revoke ownership and ARM.
-- The current firmware source sets `MAX_DEG_PER_SECOND = 120.0`; this has not
-  been physically validated. The real-profile host limits are 100 deg/s
-  (`REAL_DIAGNOSTIC`), 110 deg/s (`REAL_SAFE`), and 120 deg/s
-  (`REAL_NORMAL`); the separate physical `fast_trot` path retains its own
-  bounded conditioning. If the Nano still runs the older 30 deg/s image,
-  reflash the current firmware before using these profiles. Do not raise host
-  or firmware limits to force tracking, and complete the suspended progression
-  before any floor test.
+- The current firmware source sets `MAX_DEG_PER_SECOND = 240.0` as a fault
+  ceiling, not a shaping filter; it has not been physically validated. The
+  gait engine's commanded budgets (80 deg/s loaded stance, 190 deg/s unloaded
+  swing) and the real-profile joint limits (100 deg/s `REAL_DIAGNOSTIC`,
+  150 deg/s `REAL_SAFE`, 175 deg/s `REAL_NORMAL`) stay below it. If the Nano
+  still runs an older lower-ceiling image, reflash the current firmware
+  before using these profiles. Do not raise host or firmware limits to force
+  tracking, and complete the suspended progression before any floor test.
 - The initial tuning targets flat, raised-bench validation. Rough terrain,
   slopes, payload changes, aggressive lateral/yaw combinations, and dynamic
   recovery are outside its current scope.
-- `legacy_walk` and the older diagonal trots are preserved for compatibility,
-  but they are not substitutes for the `REAL_DIAGNOSTIC` then `REAL_SAFE`
-  progression.
+- Historical gait names are accepted only as aliases of `amble` and `trot`;
+  they are not separate implementations and not substitutes for the
+  `REAL_DIAGNOSTIC` then `REAL_SAFE` progression.
 - Simulation, automated tests, and serial dry-run do not constitute physical
   testing. Servo calibration and the complete checklist remain mandatory.
 

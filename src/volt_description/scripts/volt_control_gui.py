@@ -92,28 +92,14 @@ GAIT_LIMITS = {
 }
 
 GAIT_SEQUENCE = (
-    "diagnostic_crawl",
-    "real_safe_trot",
-    "spotmicro_video_walk",
-    "spot_walk",
-    "legacy_walk",
     "amble",
-    "slow_trot",
-    "normal_trot",
-    "fast_trot",
+    "trot",
 )
 GAIT_DISPLAY_NAMES = {
-    "diagnostic_crawl": "SLOW CRAWL",
-    "real_safe_trot": "REAL SAFE TROT",
-    "spotmicro_video_walk": "VOLT WALK",
-    "spot_walk": "VOLT STABLE WALK",
-    "legacy_walk": "LEGACY WALK",
     "amble": "AMBLE",
-    "slow_trot": "SLOW TROT",
-    "normal_trot": "NORMAL TROT",
-    "fast_trot": "FAST TROT",
+    "trot": "TROT",
 }
-DEFAULT_GAIT = "spotmicro_video_walk"
+DEFAULT_GAIT = "amble"
 DEFAULT_SPEED_PERCENT = 20
 MOTION_STATUS_TIMEOUT = 3.0
 ROUTER_STATUS_TIMEOUT = 1.0
@@ -240,26 +226,6 @@ def merge_reported_real_profiles(local_profiles, reported_profiles, protected=()
     return merged
 
 
-FAST_TROT_PRESETS = {
-    "BENCH": {
-        "stride_scale": 0.50,
-        "step_height": 0.028,
-        "hardware_cycle_period": 0.80,
-        "hardware_speed_scale": 0.25,
-    },
-    "FLOOR TEST": {
-        "stride_scale": 0.65,
-        "step_height": 0.032,
-        "hardware_cycle_period": 0.72,
-        "hardware_speed_scale": 0.35,
-    },
-    "WIDE": {
-        "stride_scale": 0.80,
-        "step_height": 0.036,
-        "hardware_cycle_period": 0.68,
-        "hardware_speed_scale": 0.45,
-    },
-}
 BALANCE_SENSITIVE_EMOTES = {
     "wave_left",
     "wave_right",
@@ -592,11 +558,6 @@ class VoltGuiNode(Node):
             "/volt/serial_command",
             10,
         )
-        self.fast_trot_tuning_publisher = self.create_publisher(
-            String,
-            "/volt/fast_trot_tuning",
-            10,
-        )
         self.real_tuning_publisher = self.create_publisher(
             String,
             "/volt/real_robot_tuning",
@@ -693,14 +654,6 @@ class VoltGuiNode(Node):
         if command not in allowed:
             return False
         return self.publish_text(self.serial_command_publisher, command)
-
-    def publish_fast_trot_tuning(self, tuning):
-        """Publish a request; the motion controller remains the authority."""
-        try:
-            payload = json.dumps(tuning, sort_keys=True)
-        except (TypeError, ValueError):
-            return False
-        return self.publish_text(self.fast_trot_tuning_publisher, payload)
 
     def publish_json(self, publisher, payload):
         try:
@@ -817,11 +770,6 @@ class VoltControlWindow(QMainWindow):
         # unclaimed until the operator explicitly presses ENABLE MOTION.
         self.current_gait = DEFAULT_GAIT
         self.gait_limits = dict(GAIT_LIMITS)
-        self.fast_trot_presets = {
-            name: dict(values)
-            for name, values in FAST_TROT_PRESETS.items()
-        }
-        self.fast_trot_hydrated = False
         try:
             shipped_profiles = load_profiles(include_user=False)
             self.real_profiles = load_profiles()
@@ -1124,114 +1072,6 @@ class VoltControlWindow(QMainWindow):
         speed_layout.addRow("Yaw trim", self.yaw_slider)
         left.addWidget(speed_group)
 
-        fast_trot_group = QGroupBox("FAST TROT TUNING")
-        fast_trot_layout = QGridLayout(fast_trot_group)
-        fast_trot_notice = QLabel(
-            "Preset buttons load values only. APPLY sends a request to the "
-            "controller, which enforces all safety limits."
-        )
-        fast_trot_notice.setWordWrap(True)
-        fast_trot_notice.setStyleSheet("color: #fbbf24;")
-        fast_trot_layout.addWidget(fast_trot_notice, 0, 0, 1, 3)
-
-        self.fast_trot_preset_buttons = []
-        for column, preset_name in enumerate(("BENCH", "FLOOR TEST", "WIDE")):
-            preset_button = QPushButton(preset_name)
-            preset_button.clicked.connect(
-                lambda _checked=False, name=preset_name: (
-                    self.load_fast_trot_preset(name)
-                )
-            )
-            if preset_name == "WIDE":
-                preset_button.setToolTip(
-                    "Loads WIDE values only. Press APPLY separately after "
-                    "successful raised-robot and floor tests."
-                )
-            fast_trot_layout.addWidget(preset_button, 1, column)
-            self.fast_trot_preset_buttons.append(preset_button)
-
-        self.fast_trot_stride_scale = QDoubleSpinBox()
-        self.fast_trot_stride_scale.setRange(0.50, 1.25)
-        self.fast_trot_stride_scale.setDecimals(2)
-        self.fast_trot_stride_scale.setSingleStep(0.05)
-        self.fast_trot_stride_scale.setValue(0.50)
-        fast_trot_layout.addWidget(QLabel("Stride scale"), 2, 0)
-        fast_trot_layout.addWidget(self.fast_trot_stride_scale, 2, 1, 1, 2)
-
-        self.fast_trot_step_height = QDoubleSpinBox()
-        self.fast_trot_step_height.setRange(0.020, 0.050)
-        self.fast_trot_step_height.setDecimals(3)
-        self.fast_trot_step_height.setSingleStep(0.001)
-        self.fast_trot_step_height.setSuffix(" m")
-        self.fast_trot_step_height.setValue(0.028)
-        fast_trot_layout.addWidget(QLabel("Step height"), 3, 0)
-        fast_trot_layout.addWidget(self.fast_trot_step_height, 3, 1, 1, 2)
-
-        self.fast_trot_hardware_cycle_period = QDoubleSpinBox()
-        self.fast_trot_hardware_cycle_period.setRange(0.50, 0.90)
-        self.fast_trot_hardware_cycle_period.setDecimals(2)
-        self.fast_trot_hardware_cycle_period.setSingleStep(0.01)
-        self.fast_trot_hardware_cycle_period.setSuffix(" s")
-        self.fast_trot_hardware_cycle_period.setValue(0.80)
-        fast_trot_layout.addWidget(QLabel("Hardware cycle"), 4, 0)
-        fast_trot_layout.addWidget(
-            self.fast_trot_hardware_cycle_period,
-            4,
-            1,
-            1,
-            2,
-        )
-
-        self.fast_trot_hardware_speed_scale = QDoubleSpinBox()
-        self.fast_trot_hardware_speed_scale.setRange(0.20, 0.75)
-        self.fast_trot_hardware_speed_scale.setDecimals(2)
-        self.fast_trot_hardware_speed_scale.setSingleStep(0.05)
-        self.fast_trot_hardware_speed_scale.setValue(0.25)
-        fast_trot_layout.addWidget(QLabel("Hardware speed"), 5, 0)
-        fast_trot_layout.addWidget(
-            self.fast_trot_hardware_speed_scale,
-            5,
-            1,
-            1,
-            2,
-        )
-
-        self.apply_fast_trot_button = QPushButton("APPLY FAST TROT TUNING")
-        self.apply_fast_trot_button.setToolTip(
-            "Request these values from the motion controller. Active-gait "
-            "updates may be rejected until the robot is stopped and settled."
-        )
-        self.apply_fast_trot_button.clicked.connect(self.apply_fast_trot_tuning)
-        fast_trot_layout.addWidget(self.apply_fast_trot_button, 6, 0, 1, 3)
-
-        self.fast_trot_tuning_status = QLabel(
-            "BENCH values loaded locally; not applied."
-        )
-        self.fast_trot_tuning_status.setWordWrap(True)
-        self.fast_trot_tuning_status.setStyleSheet("color: #94a3b8;")
-        fast_trot_layout.addWidget(self.fast_trot_tuning_status, 7, 0, 1, 3)
-
-        self.fast_trot_diagnostics = QLabel(
-            "Waiting for fast-trot diagnostics."
-        )
-        self.fast_trot_diagnostics.setWordWrap(True)
-        fast_trot_layout.addWidget(self.fast_trot_diagnostics, 8, 0, 1, 3)
-
-        self.fast_trot_stride_warning = QLabel("")
-        self.fast_trot_stride_warning.setWordWrap(True)
-        self.fast_trot_stride_warning.setStyleSheet(
-            "color: #fecaca; background: #641e1e; border: 1px solid #ef4444; "
-            "border-radius: 5px; padding: 6px; font-weight: 700;"
-        )
-        self.fast_trot_stride_warning.hide()
-        fast_trot_layout.addWidget(
-            self.fast_trot_stride_warning,
-            9,
-            0,
-            1,
-            3,
-        )
-        tuning_left.addWidget(fast_trot_group)
         tuning_left.addStretch(1)
 
         controller_group = QGroupBox("Controller")
@@ -1476,9 +1316,8 @@ class VoltControlWindow(QMainWindow):
         )
         self.real_profile_combo.addItems(ordered_profiles)
         self.real_gait_combo = QComboBox()
-        self.real_gait_combo.addItem("Slow Crawl / Diagnostic", "diagnostic_crawl")
-        self.real_gait_combo.addItem("Real Trot / Load-Safe", "real_safe_trot")
-        self.real_gait_combo.addItem("Simulation (unchanged)", "spotmicro_video_walk")
+        self.real_gait_combo.addItem("Amble / Diagnostic", "amble")
+        self.real_gait_combo.addItem("Trot / Load-Safe", "trot")
         tuning_layout.addWidget(QLabel("Profile"), 0, 0)
         tuning_layout.addWidget(self.real_profile_combo, 0, 1)
         tuning_layout.addWidget(QLabel("Profile gait"), 0, 2)
@@ -1836,8 +1675,8 @@ class VoltControlWindow(QMainWindow):
             ("B — SLOW SQUAT", lambda: self.start_physical_diagnostic("slow-squat")),
             ("C — SINGLE LEG LIFT", lambda: self.start_physical_diagnostic("single-leg-lift")),
             ("D — STEP ONE LEG", lambda: self.start_physical_diagnostic("single-leg-step")),
-            ("E — SELECT SLOW CRAWL", lambda: self.select_diagnostic_gait("diagnostic_crawl")),
-            ("F — SELECT SAFE TROT", lambda: self.select_diagnostic_gait("real_safe_trot")),
+            ("E — SELECT AMBLE", lambda: self.select_diagnostic_gait("amble")),
+            ("F — SELECT TROT", lambda: self.select_diagnostic_gait("trot")),
         )
         self.diagnostic_buttons = []
         for index, (label, callback) in enumerate(diagnostic_buttons):
@@ -1855,6 +1694,10 @@ class VoltControlWindow(QMainWindow):
         self.diagnostic_status.setWordWrap(True)
         self.diagnostic_status.setObjectName("gaitDetail")
         diagnostic_layout.addWidget(self.diagnostic_status, 5, 0, 1, 4)
+        self.gait_diagnostics = QLabel("Gait diagnostics will appear here.")
+        self.gait_diagnostics.setWordWrap(True)
+        self.gait_diagnostics.setObjectName("gaitDetail")
+        diagnostic_layout.addWidget(self.gait_diagnostics, 6, 0, 1, 4)
         diagnostics_layout.addWidget(
             diagnostic_group,
             0,
@@ -1888,11 +1731,6 @@ class VoltControlWindow(QMainWindow):
             self.drive_mode,
             self.speed_slider,
             self.yaw_slider,
-            self.apply_fast_trot_button,
-            self.fast_trot_stride_scale,
-            self.fast_trot_step_height,
-            self.fast_trot_hardware_cycle_period,
-            self.fast_trot_hardware_speed_scale,
             self.body_height,
             self.body_x,
             self.body_y,
@@ -1918,7 +1756,6 @@ class VoltControlWindow(QMainWindow):
         self.arm_mutation_controls.extend(self.diagnostic_buttons)
         self.arm_mutation_controls.extend(self.emote_start_buttons)
         self.arm_mutation_controls.extend(self.gait_button_by_name.values())
-        self.arm_mutation_controls.extend(self.fast_trot_preset_buttons)
 
     def make_spinbox(self, minimum, maximum, value, step, decimals):
         box = QDoubleSpinBox()
@@ -2309,13 +2146,11 @@ class VoltControlWindow(QMainWindow):
         ("face_status", 2),
         ("real_tuning_status", 2),
         ("diagnostic_status", 2),
-        ("fast_trot_tuning_status", 2),
-        ("fast_trot_stride_warning", 2),
-        ("fast_trot_diagnostics", 3),
         ("commanded_telemetry", 3),
         ("controller_detail", 2),
         ("hardware_face_sync", 2),
         ("gait_detail", 2),
+        ("gait_diagnostics", 3),
         ("owner_state", 1),
         ("hardware_state", 1),
         ("controller_state", 1),
@@ -2608,64 +2443,6 @@ class VoltControlWindow(QMainWindow):
             return
         self.current_gait = gait
         self.ros_node.publish_text(self.ros_node.gait_publisher, gait)
-
-    def load_fast_trot_preset(self, preset_name):
-        """Load bounded controls without publishing or changing the gait."""
-        if self.arm_mutation_is_blocked("Fast-trot preset change"):
-            return
-        preset = self.fast_trot_presets.get(
-            str(preset_name).strip().upper()
-        )
-        if preset is None:
-            return
-        self.fast_trot_stride_scale.setValue(preset["stride_scale"])
-        self.fast_trot_step_height.setValue(preset["step_height"])
-        self.fast_trot_hardware_cycle_period.setValue(
-            preset["hardware_cycle_period"]
-        )
-        self.fast_trot_hardware_speed_scale.setValue(
-            preset["hardware_speed_scale"]
-        )
-        if str(preset_name).strip().upper() == "WIDE":
-            detail = (
-                "WIDE values loaded locally but NOT applied. Use only after "
-                "successful BENCH and FLOOR TEST validation, then press APPLY "
-                "deliberately."
-            )
-            color = "#fbbf24"
-        else:
-            detail = "%s values loaded locally; not applied." % preset_name
-            color = "#94a3b8"
-        self.fast_trot_tuning_status.setText(detail)
-        self.fast_trot_tuning_status.setStyleSheet("color: %s;" % color)
-
-    def fast_trot_tuning_request(self):
-        return {
-            "stride_scale": self.fast_trot_stride_scale.value(),
-            "step_height": self.fast_trot_step_height.value(),
-            "hardware_cycle_period": (
-                self.fast_trot_hardware_cycle_period.value()
-            ),
-            "hardware_speed_scale": (
-                self.fast_trot_hardware_speed_scale.value()
-            ),
-        }
-
-    def apply_fast_trot_tuning(self):
-        """Send one request; never treat the GUI values as authoritative."""
-        if self.arm_mutation_is_blocked("Fast-trot tuning"):
-            return
-        tuning = self.fast_trot_tuning_request()
-        if self.ros_node.publish_fast_trot_tuning(tuning):
-            self.fast_trot_tuning_status.setText(
-                "Tuning request sent; waiting for controller validation/status."
-            )
-            self.fast_trot_tuning_status.setStyleSheet("color: #7dd3fc;")
-        else:
-            self.fast_trot_tuning_status.setText(
-                "Could not publish tuning request; values were not applied."
-            )
-            self.fast_trot_tuning_status.setStyleSheet("color: #fca5a5;")
 
     def mark_real_tuning_dirty(self, *_args):
         if not getattr(self, "real_tuning_initialized", False):
@@ -3414,7 +3191,7 @@ class VoltControlWindow(QMainWindow):
         self.diagnostic_status.setStyleSheet("color: #fbbf24;")
 
     def select_diagnostic_gait(self, gait):
-        if gait not in ("diagnostic_crawl", "real_safe_trot"):
+        if gait not in GAIT_SEQUENCE:
             return
         self.stop_motion_controls()
         self.select_gait(gait)
@@ -3971,33 +3748,6 @@ class VoltControlWindow(QMainWindow):
                 )
                 self.real_tuning_status.setStyleSheet("color: #fca5a5;")
             self.pending_real_tuning_request = ""
-        raw_presets = status.get("fast_trot_presets", {})
-        if isinstance(raw_presets, dict):
-            required = {
-                "stride_scale",
-                "step_height",
-                "hardware_cycle_period",
-                "hardware_speed_scale",
-            }
-            loaded_presets = {}
-            for raw_name, raw_values in raw_presets.items():
-                if not isinstance(raw_values, dict) or not required.issubset(
-                    raw_values
-                ):
-                    continue
-                try:
-                    values = {
-                        key: float(raw_values[key])
-                        for key in required
-                    }
-                except (TypeError, ValueError):
-                    continue
-                if not all(math.isfinite(value) for value in values.values()):
-                    continue
-                display_name = str(raw_name).replace("_", " ").upper()
-                loaded_presets[display_name] = values
-            if loaded_presets:
-                self.fast_trot_presets = loaded_presets
         state = raw_state.replace("_", " ").upper()
         self.state_label.setText(state)
         route_connected = (
@@ -4092,40 +3842,6 @@ class VoltControlWindow(QMainWindow):
             if button is not None:
                 button.setChecked(True)
 
-        fast_trot_tuning = status.get("fast_trot_tuning")
-        if isinstance(fast_trot_tuning, dict):
-            try:
-                if not self.fast_trot_hydrated:
-                    self.fast_trot_stride_scale.setValue(
-                        float(fast_trot_tuning["stride_scale"])
-                    )
-                    self.fast_trot_step_height.setValue(
-                        float(fast_trot_tuning["step_height"])
-                    )
-                    self.fast_trot_hardware_cycle_period.setValue(
-                        float(fast_trot_tuning["hardware_cycle_period"])
-                    )
-                    self.fast_trot_hardware_speed_scale.setValue(
-                        float(fast_trot_tuning["hardware_speed_scale"])
-                    )
-                    self.fast_trot_hydrated = True
-                self.fast_trot_tuning_status.setText(
-                    "Controller reports: stride %.2f | height %.3f m | "
-                    "hardware cycle %.2f s | hardware speed %.2f"
-                    % (
-                        float(fast_trot_tuning["stride_scale"]),
-                        float(fast_trot_tuning["step_height"]),
-                        float(fast_trot_tuning["hardware_cycle_period"]),
-                        float(fast_trot_tuning["hardware_speed_scale"]),
-                    )
-                )
-                self.fast_trot_tuning_status.setStyleSheet("color: #86efac;")
-            except (KeyError, TypeError, ValueError):
-                self.fast_trot_tuning_status.setText(
-                    "Controller returned incomplete fast-trot tuning status."
-                )
-                self.fast_trot_tuning_status.setStyleSheet("color: #fbbf24;")
-
         def aggregate_diagnostic(value):
             if isinstance(value, dict):
                 values = value.values()
@@ -4142,47 +3858,6 @@ class VoltControlWindow(QMainWindow):
                 if math.isfinite(number):
                     numeric.append(number)
             return sum(numeric) if numeric else 0.0
-
-        requested_stride = status_number("requested_stride")
-        achieved_stride = status_number("achieved_stride")
-        requested_step_height = status_number("requested_step_height")
-        achieved_step_height = status_number("achieved_step_height")
-        configured_cycle_period = status_number("configured_cycle_period")
-        current_cycle_period = status_number("current_cycle_period")
-        stance_ground_error = status_number("stance_max_ground_error")
-        stance_grounded = bool(status.get("stance_grounded", False))
-        completed_fast_trot_cycles = int(
-            status_number("fast_trot_completed_cycles")
-        )
-        stride_metric_valid = bool(
-            status.get("stride_metric_valid", True)
-        )
-        swing_pair = status.get("current_swing_pair", [])
-        if isinstance(swing_pair, (list, tuple)):
-            swing_pair_text = " + ".join(str(leg) for leg in swing_pair)
-        else:
-            swing_pair_text = str(swing_pair)
-        if not swing_pair_text:
-            swing_pair_text = "none"
-
-        excursion_value = status.get("maximum_joint_excursion_deg", 0.0)
-        if isinstance(excursion_value, dict):
-            excursion_candidates = []
-            for value in excursion_value.values():
-                try:
-                    excursion_candidates.append(float(value))
-                except (TypeError, ValueError):
-                    continue
-            maximum_excursion = (
-                max(excursion_candidates)
-                if excursion_candidates
-                else 0.0
-            )
-        else:
-            try:
-                maximum_excursion = float(excursion_value)
-            except (TypeError, ValueError):
-                maximum_excursion = 0.0
 
         velocity_clamps = aggregate_diagnostic(
             status.get("joint_velocity_clamp_count", 0)
@@ -4215,27 +3890,16 @@ class VoltControlWindow(QMainWindow):
         else:
             tracking_text = "%.3f rad" % tracking_error
         arduino_frame_rate = status_number("arduino_frame_rate")
-        self.fast_trot_diagnostics.setText(
-            "Stride requested/achieved X: %.1f / %.1f mm | metric: %s\n"
-            "Clearance requested/achieved: %.1f / %.1f mm\n"
-            "Cycle configured/actual: %.3f / %.3f s | "
-            "Stance grounded: %s (%.1f mm error)\n"
-            "Swing pair: %s | Max joint excursion: %.1f deg\n"
+        cycle_period = status_number("cycle_period")
+        swing = list(status.get("swing_legs", []))
+        self.gait_diagnostics.setText(
+            "Cycle period: %.2f s | Swing: %s\n"
             "Velocity clamps: %d | Acceleration clamps: %d | "
             "IK projections: %d\n"
             "Tracking error: %s | Arduino frames: %.1f Hz"
             % (
-                requested_stride * 1000.0,
-                achieved_stride * 1000.0,
-                "valid" if stride_metric_valid else "N/A while turning",
-                requested_step_height * 1000.0,
-                achieved_step_height * 1000.0,
-                configured_cycle_period,
-                current_cycle_period,
-                "yes" if stance_grounded else "no",
-                stance_ground_error * 1000.0,
-                swing_pair_text,
-                maximum_excursion,
+                cycle_period,
+                " + ".join(swing) if swing else "none",
                 int(velocity_clamps),
                 int(acceleration_clamps),
                 int(projection_count),
@@ -4243,37 +3907,6 @@ class VoltControlWindow(QMainWindow):
                 arduino_frame_rate,
             )
         )
-        if (
-            requested_stride > 0.0
-            and completed_fast_trot_cycles > 0
-            and (
-                not stance_grounded
-                or (
-                    stride_metric_valid
-                    and achieved_stride < 0.80 * requested_stride
-                )
-            )
-        ):
-            if not stance_grounded:
-                self.fast_trot_stride_warning.setText(
-                    "FAST TROT CONTACT WARNING: a commanded stance foot is "
-                    "not within the grounded tolerance. The controller will "
-                    "not count this as achieved propulsion."
-                )
-            else:
-                achieved_percent = (
-                    100.0 * achieved_stride / requested_stride
-                )
-                self.fast_trot_stride_warning.setText(
-                    "FAST TROT STRIDE WARNING: achieved %.0f%% of requested "
-                    "(below the 80%% threshold). Check IK projection, joint "
-                    "limits, smoothing, and tracking."
-                    % achieved_percent
-                )
-            self.fast_trot_stride_warning.show()
-        else:
-            self.fast_trot_stride_warning.clear()
-            self.fast_trot_stride_warning.hide()
 
         error = status.get("joint_error")
         position_controller_text = (

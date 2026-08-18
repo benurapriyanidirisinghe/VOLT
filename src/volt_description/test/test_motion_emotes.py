@@ -102,8 +102,8 @@ def make_controller(catalog, gait_active=False):
     controller.gait_configs = {
         name: dict(config) for name, config in GAITS.items()
     }
-    controller.gait_name = "spot_walk"
-    controller.requested_gait = "spot_walk"
+    controller.gait_name = "amble"
+    controller.requested_gait = "amble"
     controller.pending_gait = None
     controller.gait_controller = FakeGaitController(active=gait_active)
     controller.motion_active = bool(gait_active)
@@ -497,27 +497,25 @@ class MotionEmoteControllerTests(unittest.TestCase):
         )
 
     def test_real_hardware_node_initializes_with_diagnostic_profile(self):
-        physical_trot = ROOT / "config" / "physical_fast_trot.yaml"
         rclpy.init(args=[
             "--ros-args",
             "-p", "hardware_mode:=true",
             "-p", "open_loop_hardware:=true",
             "-p", "use_sim_time:=false",
-            "-p", "physical_fast_trot_config_file:=%s" % physical_trot,
         ])
         node = None
         try:
             node = VoltMotionController()
             self.assertTrue(node.hardware_mode)
             self.assertEqual(node.active_real_profile, "REAL_DIAGNOSTIC")
-            self.assertEqual(node.gait_name, "diagnostic_crawl")
+            self.assertEqual(node.gait_name, "amble")
             self.assertAlmostEqual(
                 node.max_joint_velocity,
                 math.radians(100.0),
             )
             self.assertAlmostEqual(
                 node.max_joint_acceleration,
-                math.radians(240.0),
+                math.radians(2400.0),
             )
             self.assertAlmostEqual(node.joint_smoothing_alpha, 0.85)
         finally:

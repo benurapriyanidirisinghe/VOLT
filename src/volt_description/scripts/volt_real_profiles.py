@@ -60,19 +60,19 @@ NUMERIC_BOUNDS = {
     "body_roll_deg": (-4.5, 4.5),
     "body_pitch_deg": (-4.5, 4.5),
     "body_yaw_deg": (-10.0, 10.0),
-    # The shoulder URDF limit is 2 rad/s (114.6 deg/s) and the production
-    # firmware currently slews every channel at 120 deg/s.  A 120 deg/s UI
-    # ceiling therefore cannot bypass either downstream authority.
-    "max_joint_velocity_deg_s": (60.0, 120.0),
-    "max_joint_acceleration_deg_s2": (60.0, 1200.0),
+    # The firmware slews every channel at up to 240 deg/s; the gait engine
+    # validates a 190 deg/s swing budget.  A 190 deg/s UI ceiling therefore
+    # cannot bypass either downstream authority.
+    "max_joint_velocity_deg_s": (60.0, 190.0),
+    "max_joint_acceleration_deg_s2": (600.0, 6000.0),
     "smoothing_amount": (0.0, 0.80),
     "touchdown_softness": (0.08, 0.35),
     "stance_width": (0.080, 0.130),
 }
 
 TUNABLE_GAITS = (
-    "diagnostic_crawl",
-    "real_safe_trot",
+    "trot",
+    "amble",
 )
 
 
@@ -117,12 +117,9 @@ def validate_tuning(values, allow_simulation=True):
         raise RealProfileError("profile is missing: %s" % missing)
 
     gait = str(values["gait"]).strip().lower()
-    allowed_gaits = set(TUNABLE_GAITS)
-    if allow_simulation:
-        allowed_gaits.add("spotmicro_video_walk")
-    if gait not in allowed_gaits:
+    if gait not in TUNABLE_GAITS:
         raise RealProfileError(
-            "gait must be one of %s" % (tuple(sorted(allowed_gaits)),)
+            "gait must be one of %s" % (TUNABLE_GAITS,)
         )
 
     result = {"gait": gait}
@@ -140,15 +137,13 @@ def validate_tuning(values, allow_simulation=True):
             )
         result[field] = value
 
-    swing_ratio = 1.0 - result["duty_factor"]
-    if gait == "diagnostic_crawl" and swing_ratio > 0.25 + 1e-9:
+    duty = result["duty_factor"]
+    if gait == "amble" and not 0.70 - 1e-9 <= duty <= 0.86 + 1e-9:
         raise RealProfileError(
-            "diagnostic crawl duty factor must keep at least three legs in stance"
+            "amble duty factor must keep at least three legs in stance"
         )
-    if gait == "real_safe_trot" and not (
-        0.10 - 1e-9 <= swing_ratio <= 0.45 + 1e-9
-    ):
-        raise RealProfileError("real-safe trot swing ratio is outside its safe range")
+    if gait == "trot" and not 0.52 - 1e-9 <= duty <= 0.68 + 1e-9:
+        raise RealProfileError("trot duty factor is outside its safe range")
     # Liftoff uses no more than the touchdown fraction, leaving at least 30%
     # of every swing for horizontal transfer at the upper 0.35 bound.
     return result

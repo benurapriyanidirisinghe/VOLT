@@ -17,16 +17,9 @@ def generate_launch_description():
     dry_run = LaunchConfiguration("dry_run")
     hardware_enabled = LaunchConfiguration("hardware_enabled")
     calibration_file = LaunchConfiguration("calibration_file")
-    physical_fast_trot_config_file = LaunchConfiguration(
-        "physical_fast_trot_config_file"
-    )
     real_robot_profiles_file = LaunchConfiguration("real_robot_profiles_file")
     emote_config_file = LaunchConfiguration("emote_config_file")
     enable_physical_tests = LaunchConfiguration("enable_physical_tests")
-    fast_trot_diagnostic = LaunchConfiguration("fast_trot_diagnostic")
-    fast_trot_diagnostic_output = LaunchConfiguration(
-        "fast_trot_diagnostic_output"
-    )
     config_file = PathJoinSubstitution([
         FindPackageShare("volt_description"),
         "config",
@@ -54,9 +47,6 @@ def generate_launch_description():
                 # router HOLD and Arduino ARM remain separate motion gates.
                 "open_loop_hardware": True,
                 "gait_config_file": config_file,
-                "physical_fast_trot_config_file": (
-                    physical_fast_trot_config_file
-                ),
                 "real_robot_profiles_file": real_robot_profiles_file,
                 "emote_config_file": emote_config_file,
                 "enable_physical_tests": ParameterValue(
@@ -96,23 +86,6 @@ def generate_launch_description():
         name="volt_control_gui",
         output="screen",
         condition=IfCondition(gui),
-    )
-
-    diagnostic = Node(
-        package="volt_description",
-        executable="volt_fast_trot_diagnostic.py",
-        name="volt_fast_trot_diagnostic",
-        output="screen",
-        condition=IfCondition(fast_trot_diagnostic),
-        parameters=[{
-            "output_path": fast_trot_diagnostic_output,
-            "auto_start": True,
-            "hardware_enabled": False,
-            "use_sim_time": ParameterValue(
-                use_sim_time,
-                value_type=bool,
-            ),
-        }],
     )
 
     return LaunchDescription([
@@ -169,18 +142,6 @@ def generate_launch_description():
             description="Servo calibration YAML file",
         ),
         DeclareLaunchArgument(
-            "physical_fast_trot_config_file",
-            default_value=PathJoinSubstitution([
-                FindPackageShare("volt_description"),
-                "config",
-                "physical_fast_trot.yaml",
-            ]),
-            description=(
-                "Dedicated physical fast-trot YAML; simulation profile is "
-                "never loaded from this file"
-            ),
-        ),
-        DeclareLaunchArgument(
             "real_robot_profiles_file",
             default_value=PathJoinSubstitution([
                 FindPackageShare("volt_description"),
@@ -205,19 +166,8 @@ def generate_launch_description():
                 "Enable the leased support-stand Cartesian test request topic"
             ),
         ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic",
-            default_value="false",
-            description="Passively record fast-trot status and canonical commands",
-        ),
-        DeclareLaunchArgument(
-            "fast_trot_diagnostic_output",
-            default_value="",
-            description="Optional diagnostic CSV path or output directory",
-        ),
         command_router,
         motion_controller,
         serial_bridge,
         control_gui,
-        diagnostic,
     ])
