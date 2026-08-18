@@ -8,6 +8,7 @@ import yaml
 
 from volt_kinematics import JOINT_NAMES
 from volt_servo_calibration import ServoCalibrationTable
+from volt_serial_protocol import format_frame_command
 
 
 def parse_args():
@@ -20,7 +21,7 @@ def parse_args():
 
 def frame_line(table, pose):
     frame, details = table.channel_frame_from_positions(pose)
-    return "FRAME " + " ".join("%.2f" % value for value in frame), details
+    return format_frame_command(frame), details
 
 
 def main():

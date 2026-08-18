@@ -15,3 +15,6 @@ __pycache__/
 
 *.swp
 *~
+
+# one-off GUI recovery artifacts (bytecode + stub backup)
+gui_recovery/

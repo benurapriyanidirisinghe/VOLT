@@ -38,12 +38,15 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "port": serial_port,
-            "baud_rate": "115200",
+            "baud_rate": "57600",
             "calibration_file": calibration_file,
             "max_send_rate": max_send_rate,
             "dry_run": dry_run,
             "hardware_enabled": use_hardware,
             "auto_arm": False,
+            # Calibration is a supported, manual single-servo workflow and
+            # intentionally does not launch the walking motion controller.
+            "require_motion_safe_to_arm": False,
         }],
     )
 

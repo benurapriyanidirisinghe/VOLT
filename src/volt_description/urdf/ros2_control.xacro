@@ -112,7 +112,7 @@
           <robot_param_node>robot_state_publisher</robot_param_node>
           <parameters>$(find volt_description)/config/controllers.yaml</parameters>
           <controller_manager_name>controller_manager</controller_manager_name>
-          <position_proportional_gain>0.35</position_proportional_gain>
+          <position_proportional_gain>0.1</position_proportional_gain>
         </plugin>
       </gazebo>
     </xacro:unless>

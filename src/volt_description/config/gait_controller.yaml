@@ -1,15 +1,198 @@
 volt_motion_controller:
   ros__parameters:
-    use_sim_time: true
     auto_ready_pose: false
     body_height: 0.200
-    control_rate: 100.0
+    # Gazebo fast trot uses the 0.42 s cycle and needs the finer command
+    # sampling. Hardware launch files override this to 100 Hz.
+    control_rate: 200.0
     command_timeout: 0.60
+    # STEP IN PLACE is persistent only while the GUI/operator heartbeat exists.
+    step_keepalive_timeout: 1.0
     joint_error_limit: 0.45
+    # A foot may lift only after prior-cycle joint commands and fresh measured
+    # feedback have converged more tightly than the general warning threshold.
+    support_joint_error_limit: 0.15
+    support_command_error_limit: 0.08
+    support_feedback_timeout: 0.25
+    minimum_workspace_margin: 0.010
     stand_duration: 4.0
     sit_duration: 4.7
+    # Natural Sit/Stand uses planted Cartesian feet and canonical IK. The rear
+    # body lowers and shifts backward while the front legs remain supporting.
+    natural_sit_height: 0.145
+    natural_sit_rearward_shift: 0.020
+    natural_sit_pitch_deg: -10.0
     debug_gait: false
+    diagnostic_log_rate: 1.0
+    sudden_joint_jump_deg: 10.0
     max_joint_velocity: 4.0
-    max_joint_acceleration: 18.0
-    joint_smoothing_factor: 0.12
-    smoothing_alpha: 0.12
+    # Global ceiling; per-backend profiles in volt_motion_controller keep
+    # hardware and all non-fast gaits at 18 rad/s^2.
+    max_joint_acceleration: 60.0
+    joint_smoothing_alpha: 0.12
+    hardware_mode: false
+
+    # Conservative, statically stable crawl adapted from the eight-phase
+    # mike4192/spotMicro walk sequence. Four shift+swing pairs form one cycle.
+    spot_walk:
+      cycle_period: 4.80
+      support_shift_duration: 0.60
+      swing_duration: 0.60
+      step_height: 0.014
+      maximum_step_x: 0.028
+      maximum_step_y: 0.010
+      maximum_yaw_rate: 0.14
+      body_shift_x: 0.012
+      body_shift_y: 0.015
+      support_margin: 0.004
+      touchdown_lead: 0.50
+      settle_duration: 0.80
+      velocity_deadband: 0.002
+      command_acceleration: 0.08
+      velocity_filter_alpha: 0.18
+      joint_smoothing_alpha: 0.10
+      maximum_body_roll: 0.08
+      maximum_body_pitch: 0.08
+      simulation_speed_scale: 1.00
+      hardware_speed_scale: 0.25
+
+    # Slow, visibly shifted crawl tuned to reproduce the deliberate movement
+    # style in the user's SpotMicro reference video. The five internal states
+    # for each leg are SHIFT, VERIFY_SUPPORT, LIFT_AND_SWING, TOUCHDOWN, and
+    # SETTLE. The controller must validate support before leaving the ground.
+    spotmicro_video_walk:
+      type: stable_crawl
+      leg_sequence:
+        - rear_right
+        - front_right
+        - rear_left
+        - front_left
+
+      full_cycle_duration: 5.20
+      shift_duration: 0.38
+      support_verify_duration: 0.08
+      swing_duration: 0.68
+      settle_duration: 0.16
+
+      step_height: 0.028
+      max_step_x: 0.035
+      max_step_y: 0.015
+      max_yaw_step: 0.10
+
+      forward_body_shift: 0.020
+      rearward_body_shift: 0.010
+      lateral_body_shift: 0.018
+      support_margin: 0.012
+      shift_completion_threshold: 0.92
+
+      gait_body_height_offset: -0.010
+      body_bob_amplitude: 0.001
+      body_roll_amplitude: 0.0
+      body_pitch_amplitude: 0.0
+
+      touchdown_lead: 0.50
+      command_deadband_linear: 0.002
+      command_deadband_yaw: 0.015
+      velocity_filter_alpha: 0.12
+      joint_smoothing_alpha: 0.16
+
+      simulation_time_scale: 1.0
+      hardware_time_scale: 1.20
+      hardware_speed_scale: 0.20
+
+    # Cartesian diagonal trot for the physical robot.  The base values describe
+    # the requested wide trajectory; hardware starts with FAST TROT BENCH below
+    # and can only be widened deliberately through the validated tuning topic.
+    # Servo centres/directions remain exclusively in servo_calibration.yaml.
+    fast_trot:
+      type: physical_trot
+
+      cycle_period: 0.58
+      simulation_cycle_period: 0.42
+      hardware_cycle_period: 0.62
+      step_length_x: 0.055
+      step_height: 0.035
+      touchdown_lead_x: 0.0275
+      liftoff_trail_x: -0.0275
+      max_step_length_x: 0.075
+      min_step_length_x: 0.025
+      lateral_step_y: 0.0
+      max_yaw_step: 0.10
+      stance_ratio: 0.58
+      swing_ratio: 0.42
+
+      body_height_offset: -0.012
+      forward_pitch_bias: 0.025
+      maximum_body_roll: 0.06
+      maximum_body_pitch: 0.08
+      body_bob: 0.0005
+      body_roll: 0.0
+
+      velocity_filter_alpha: 0.22
+      joint_smoothing_alpha: 0.28
+      command_acceleration: 0.45
+      joint_acceleration_limit: 40.0
+      phase_tracking_error_soft_limit: 0.20944
+      phase_transition_error_limit: 0.01745
+      minimum_phase_rate_scale: 0.10
+      stance_ground_tolerance: 0.002
+      startup_ramp_time: 1.20
+      shutdown_ramp_time: 0.80
+      startup_stride_fraction: 0.30
+      startup_cycle_speed_fraction: 0.70
+
+      stride_scale: 1.00
+      simulation_stride_scale: 1.00
+      hardware_stride_scale: 0.75
+      maximum_safe_stride_scale: 1.25
+      simulation_speed_scale: 1.00
+      hardware_speed_scale: 0.55
+
+      # Canonical Twist envelopes.  Runtime Cartesian planning additionally
+      # limits body speed so one stance produces no more than its requested
+      # lead-to-trail sweep.
+      simulation_max_x: 0.300
+      hardware_max_x: 0.200
+      max_y: 0.0
+      hardware_joint_velocity_limit_deg_s: 110.0
+
+      # Explicit physical-profile aliases and load-bearing geometry.  These
+      # mirror the compatibility fields above so external tools can tune using
+      # names that describe physical behavior directly.
+      gait_frequency: 2.380952381
+      stride_length: 0.055
+      duty_factor: 0.58
+      body_height: 0.188
+      # Half-width from body centerline to each foot. Front/rear offsets are
+      # conservative deltas from the calibrated NOMINAL_FEET x positions.
+      stance_width: 0.104
+      front_foot_offset: 0.0
+      rear_foot_offset: 0.0
+      touchdown_blend: 0.20
+      liftoff_blend: 0.18
+      trot_ready_time: 1.0
+      joint_velocity_limit: 110.0
+      shoulder_joint_velocity_limit: 60.0
+      upper_leg_joint_velocity_limit: 85.0
+      knee_joint_velocity_limit: 105.0
+      max_joint_command_delta_deg: 1.10
+      command_smoothing: 0.28
+      physical_motion_scale: 0.75
+      contact_settle_time: 0.035
+
+      presets:
+        bench:
+          stride_scale: 0.50
+          hardware_speed_scale: 0.25
+          hardware_cycle_period: 0.75
+          step_height: 0.025
+        floor_test:
+          stride_scale: 0.65
+          hardware_speed_scale: 0.40
+          hardware_cycle_period: 0.68
+          step_height: 0.030
+        wide:
+          stride_scale: 0.85
+          hardware_speed_scale: 0.55
+          hardware_cycle_period: 0.62
+          step_height: 0.035

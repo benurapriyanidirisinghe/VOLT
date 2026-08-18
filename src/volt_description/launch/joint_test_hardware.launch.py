@@ -11,7 +11,7 @@ def generate_launch_description():
     baud_rate = LaunchConfiguration("baud_rate")
     return LaunchDescription([
         DeclareLaunchArgument("serial_port", default_value="/dev/ttyUSB0"),
-        DeclareLaunchArgument("baud_rate", default_value="115200"),
+        DeclareLaunchArgument("baud_rate", default_value="250000"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution([

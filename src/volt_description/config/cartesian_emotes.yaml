@@ -1,0 +1,455 @@
+schema_version: 1
+base_body_height_m: 0.200
+
+# Every keyframe is a complete target relative to the neutral body and
+# NOMINAL_FEET. Omitted body fields and omitted legs mean zero offset, not
+# inheritance. duration_s is the transition time from the preceding keyframe.
+# The engine converts *_deg values to radians before returning a frame.
+emotes:
+  push_ups:
+    description: Whole-body lower and rise with all four feet planted. The 20 mm
+      keyframe is the base travel; the GUI push-up travel control scales it up to
+      60 mm via the emote depth option.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.8
+        easing: smootherstep
+        body:
+          height_offset_m: -0.020
+        feet: {}
+      - duration_s: 0.8
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  body_roll:
+    description: Standing center-left-center-right-center body wiggle.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          roll_deg: 4.5
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          roll_deg: -4.5
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  nod:
+    description: Gentle nose-down and nose-up standing nod.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          pitch_deg: 5.0
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          pitch_deg: -4.0
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  wave_left:
+    description: Shift right, lift the front-left foot, wave, plant, and recenter.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet:
+          front_left: [0.008, -0.004, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet:
+          front_left: [0.008, 0.010, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet:
+          front_left: [0.008, -0.010, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet:
+          front_left: [0.008, 0.010, 0.038]
+      - duration_s: 0.60
+        easing: smootherstep
+        body:
+          y_m: -0.010
+          roll_deg: -2.0
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  wave_right:
+    description: Shift left, lift the front-right foot, wave, plant, and recenter.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet:
+          front_right: [0.008, 0.004, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet:
+          front_right: [0.008, -0.010, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet:
+          front_right: [0.008, 0.010, 0.038]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet:
+          front_right: [0.008, -0.010, 0.038]
+      - duration_s: 0.60
+        easing: smootherstep
+        body:
+          y_m: 0.010
+          roll_deg: 2.0
+        feet: {}
+      - duration_s: 0.65
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  heart:
+    description: Rearward crouch with sequential front-foot heart curves and three-leg support.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.80
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet: {}
+      - duration_s: 0.70
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_left: [0.010, -0.008, 0.035]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_left: [0.012, 0.018, 0.040]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_left: [0.004, -0.008, 0.028]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_left: [0.000, -0.018, 0.018]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet: {}
+      - duration_s: 0.70
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_right: [0.010, 0.008, 0.035]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_right: [0.012, -0.018, 0.040]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_right: [0.004, 0.008, 0.028]
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet:
+          front_right: [0.000, 0.018, 0.018]
+      - duration_s: 0.70
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.012
+        feet: {}
+      - duration_s: 0.80
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  bow:
+    description: Lower and pitch the front body while the four support feet remain fixed.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.85
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.006
+          pitch_deg: 6.0
+        feet: {}
+      - duration_s: 0.55
+        easing: smootherstep
+        body:
+          height_offset_m: -0.010
+          x_m: -0.006
+          pitch_deg: 6.0
+        feet: {}
+      - duration_s: 0.85
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  stretch:
+    description: Gentle play-bow with the front feet extended forward before recovery.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.95
+        easing: smootherstep
+        body:
+          height_offset_m: -0.008
+          x_m: -0.006
+          pitch_deg: 5.0
+        feet:
+          front_left: [0.025, 0.000, 0.000]
+          front_right: [0.025, 0.000, 0.000]
+      - duration_s: 0.65
+        easing: smootherstep
+        body:
+          height_offset_m: -0.008
+          x_m: -0.006
+          pitch_deg: 5.0
+        feet:
+          front_left: [0.025, 0.000, 0.000]
+          front_right: [0.025, 0.000, 0.000]
+      - duration_s: 0.95
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  happy_dance:
+    description: Small alternating body rolls, height bounces, and front-foot lifts.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          height_offset_m: -0.005
+          roll_deg: 3.5
+        feet:
+          front_left: [0.000, 0.000, 0.014]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          height_offset_m: 0.004
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          height_offset_m: -0.005
+          roll_deg: -3.5
+        feet:
+          front_right: [0.000, 0.000, 0.014]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          height_offset_m: 0.004
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          height_offset_m: -0.005
+          roll_deg: 3.5
+        feet:
+          front_left: [0.000, 0.000, 0.014]
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          height_offset_m: 0.004
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          height_offset_m: -0.005
+          roll_deg: -3.5
+        feet:
+          front_right: [0.000, 0.000, 0.014]
+      - duration_s: 0.55
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  shake_no:
+    description: Gentle left-right body yaw conveying no while all feet stay planted.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          yaw_deg: 5.5
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          yaw_deg: -5.5
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          yaw_deg: 5.5
+        feet: {}
+      - duration_s: 0.40
+        easing: smootherstep
+        body:
+          yaw_deg: -5.5
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  look_left:
+    description: Compatibility look-left gesture using a small planted body yaw.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.60
+        easing: smootherstep
+        body:
+          yaw_deg: 4.0
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          yaw_deg: 4.0
+        feet: {}
+      - duration_s: 0.60
+        easing: smootherstep
+        body: {}
+        feet: {}
+
+  look_right:
+    description: Compatibility look-right gesture using a small planted body yaw.
+    keyframes:
+      - duration_s: 0.0
+        easing: smootherstep
+        body: {}
+        feet: {}
+      - duration_s: 0.60
+        easing: smootherstep
+        body:
+          yaw_deg: -4.0
+        feet: {}
+      - duration_s: 0.45
+        easing: smootherstep
+        body:
+          yaw_deg: -4.0
+        feet: {}
+      - duration_s: 0.60
+        easing: smootherstep
+        body: {}
+        feet: {}

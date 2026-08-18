@@ -1,0 +1,84 @@
+version: 1
+
+# Canonical SI units except fields explicitly suffixed with _deg.  These are
+# trajectory/conditioning values only; servo calibration remains in
+# servo_calibration.yaml.
+profiles:
+  SIMULATION:
+    gait: spotmicro_video_walk
+    cycle_duration: 5.20
+    stride_length: 0.035
+    lateral_stride_width: 0.015
+    step_height: 0.028
+    duty_factor: 0.80
+    body_height: 0.200
+    body_x: 0.0
+    body_y: 0.0
+    body_roll_deg: 0.0
+    body_pitch_deg: 0.0
+    body_yaw_deg: 0.0
+    max_joint_velocity_deg_s: 114.0
+    max_joint_acceleration_deg_s2: 1200.0
+    smoothing_amount: 0.0
+    touchdown_softness: 0.18
+    stance_width: 0.104
+
+  # First loaded-floor profile: one leg at a time, small stride, 40 mm toe
+  # clearance, and bounded servo dynamics. Command-path lag can extend the
+  # nominal 2.0 s cycle whenever filtered commands have not settled.
+  REAL_DIAGNOSTIC:
+    gait: diagnostic_crawl
+    cycle_duration: 2.00
+    stride_length: 0.035
+    lateral_stride_width: 0.010
+    step_height: 0.040
+    duty_factor: 0.80
+    body_height: 0.200
+    body_x: 0.0
+    body_y: 0.0
+    body_roll_deg: 0.0
+    body_pitch_deg: 0.0
+    body_yaw_deg: 0.0
+    max_joint_velocity_deg_s: 100.0
+    max_joint_acceleration_deg_s2: 240.0
+    smoothing_amount: 0.15
+    touchdown_softness: 0.30
+    stance_width: 0.104
+
+  REAL_SAFE:
+    gait: real_safe_trot
+    cycle_duration: 1.20
+    stride_length: 0.035
+    lateral_stride_width: 0.008
+    step_height: 0.036
+    duty_factor: 0.65
+    body_height: 0.195
+    body_x: -0.004
+    body_y: 0.0
+    body_roll_deg: 0.0
+    body_pitch_deg: 1.0
+    body_yaw_deg: 0.0
+    max_joint_velocity_deg_s: 110.0
+    max_joint_acceleration_deg_s2: 360.0
+    smoothing_amount: 0.12
+    touchdown_softness: 0.28
+    stance_width: 0.104
+
+  REAL_NORMAL:
+    gait: real_safe_trot
+    cycle_duration: 0.90
+    stride_length: 0.050
+    lateral_stride_width: 0.012
+    step_height: 0.038
+    duty_factor: 0.60
+    body_height: 0.195
+    body_x: -0.003
+    body_y: 0.0
+    body_roll_deg: 0.0
+    body_pitch_deg: 1.0
+    body_yaw_deg: 0.0
+    max_joint_velocity_deg_s: 120.0
+    max_joint_acceleration_deg_s2: 520.0
+    smoothing_amount: 0.08
+    touchdown_softness: 0.22
+    stance_width: 0.104

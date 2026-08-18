@@ -1,18 +1,52 @@
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+    SetEnvironmentVariable,
+    TimerAction,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def start_after_success(next_action, process_name):
+    """Start the next stage only when the preceding process exited cleanly."""
+
+    def on_exit(event, _context):
+        if event.returncode == 0:
+            return [next_action]
+        reason = "%s failed with exit code %d" % (
+            process_name,
+            event.returncode,
+        )
+        return [
+            LogInfo(msg=reason + "; stopping the partial simulation stack."),
+            EmitEvent(event=Shutdown(reason=reason)),
+        ]
+
+    return on_exit
 
 
 def generate_launch_description():
     package_name = "volt_description"
 
     gui = LaunchConfiguration("gui")
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    actuator_profile = LaunchConfiguration("actuator_profile")
     pkg_share = FindPackageShare(package_name)
+    package_share_path = get_package_share_directory(package_name)
+    resource_root = os.path.dirname(package_share_path)
 
     xacro_file = PathJoinSubstitution([
         pkg_share,
@@ -30,28 +64,33 @@ def generate_launch_description():
         "robot_description": Command([
             "xacro ",
             xacro_file,
-            " sim_backend:=gz"
+            " sim_backend:=gz actuator_profile:=",
+            actuator_profile,
         ])
     }
 
-    # Gazebo Sim / Ignition resource paths.
-    # Needed so package://volt_description/urdf/stl/*.stl resolves.
+    # Package-derived Gazebo resource paths make package:// mesh URIs work from
+    # both normal and --symlink-install workspaces without a user/workspace path.
     set_ign_resource_path = SetEnvironmentVariable(
         name="IGN_GAZEBO_RESOURCE_PATH",
-        value=[
-            os.environ.get("IGN_GAZEBO_RESOURCE_PATH", ""),
-            ":/home/ros2/Documents/volt_ws/src",
-            ":/home/ros2/Documents/volt_ws/install"
-        ]
+        value=os.pathsep.join(
+            path for path in (
+                resource_root,
+                os.environ.get("IGN_GAZEBO_RESOURCE_PATH", ""),
+            )
+            if path
+        ),
     )
 
     set_gz_resource_path = SetEnvironmentVariable(
         name="GZ_SIM_RESOURCE_PATH",
-        value=[
-            os.environ.get("GZ_SIM_RESOURCE_PATH", ""),
-            ":/home/ros2/Documents/volt_ws/src",
-            ":/home/ros2/Documents/volt_ws/install"
-        ]
+        value=os.pathsep.join(
+            path for path in (
+                resource_root,
+                os.environ.get("GZ_SIM_RESOURCE_PATH", ""),
+            )
+            if path
+        ),
     )
 
     gazebo_sim = IncludeLaunchDescription(
@@ -68,7 +107,8 @@ def generate_launch_description():
                     "' == 'true' else '-r -s -v 2 '"
                 ]),
                 world_file
-            ]
+            ],
+            "on_exit_shutdown": "true",
         }.items()
     )
 
@@ -87,7 +127,15 @@ def generate_launch_description():
         executable="robot_state_publisher",
         name="robot_state_publisher",
         output="screen",
-        parameters=[robot_description]
+        parameters=[
+            robot_description,
+            {
+                "use_sim_time": ParameterValue(
+                    use_sim_time,
+                    value_type=bool,
+                ),
+            },
+        ]
     )
 
     spawn_robot = Node(
@@ -131,34 +179,56 @@ def generate_launch_description():
         output="screen"
     )
 
+    spawn_then_joint_state = RegisterEventHandler(
+        OnProcessExit(
+            target_action=spawn_robot,
+            on_exit=start_after_success(
+                joint_state_broadcaster_spawner,
+                "VOLT entity creation",
+            ),
+        )
+    )
+    joint_state_then_position = RegisterEventHandler(
+        OnProcessExit(
+            target_action=joint_state_broadcaster_spawner,
+            on_exit=start_after_success(
+                joint_group_position_controller_spawner,
+                "joint_state_broadcaster spawner",
+            ),
+        )
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             "gui",
             default_value="true",
             description="Start Gazebo Sim GUI"
         ),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="true",
+            description="Use the bridged Gazebo /clock for simulation nodes",
+        ),
+        DeclareLaunchArgument(
+            "actuator_profile",
+            default_value="simulation",
+            choices=["simulation", "td8130mg"],
+            description=(
+                "Gazebo actuator limits: proven simulation or firmware-rate "
+                "TD-8130MG approximation"
+            ),
+        ),
         set_ign_resource_path,
         set_gz_resource_path,
+        spawn_then_joint_state,
+        joint_state_then_position,
 
         gazebo_sim,
-        TimerAction(
-            period=1.0,
-            actions=[clock_bridge]
-        ),
+        clock_bridge,
         robot_state_publisher,
 
         TimerAction(
-            period=3.0,
+            period=2.0,
             actions=[spawn_robot]
-        ),
-
-        TimerAction(
-            period=7.0,
-            actions=[joint_state_broadcaster_spawner]
-        ),
-
-        TimerAction(
-            period=10.0,
-            actions=[joint_group_position_controller_spawner]
         ),
     ])

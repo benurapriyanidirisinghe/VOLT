@@ -1,5 +1,11 @@
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, SetEnvironmentVariable, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    SetEnvironmentVariable,
+    TimerAction,
+)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -9,20 +15,18 @@ import os
 
 def generate_launch_description():
     package_name = "volt_description"
+    package_share_path = get_package_share_directory(package_name)
+    resource_root = os.path.dirname(package_share_path)
 
     gazebo_model_path = SetEnvironmentVariable(
         name="GAZEBO_MODEL_PATH",
-        value=[
-            os.environ.get("GAZEBO_MODEL_PATH", ""),
-            ":/home/ros2/Documents/volt_ws/src"
-        ]
-    )
-    gazebo_plugin_path = SetEnvironmentVariable(
-        name="GAZEBO_PLUGIN_PATH",
-        value=[
-            os.environ.get("GAZEBO_PLUGIN_PATH", ""),
-            ":/opt/ros/humble/lib"
-        ]
+        value=os.pathsep.join(
+            path for path in (
+                resource_root,
+                os.environ.get("GAZEBO_MODEL_PATH", ""),
+            )
+            if path
+        ),
     )
 
     gui = LaunchConfiguration("gui")
@@ -117,7 +121,6 @@ def generate_launch_description():
         ),
 
         gazebo_model_path,
-        gazebo_plugin_path,
         gazebo,
         robot_state_publisher,
         spawn_robot,

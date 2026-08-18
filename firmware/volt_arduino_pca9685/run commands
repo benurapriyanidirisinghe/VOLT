@@ -1,0 +1,26 @@
+cd /home/ros2/Documents/volt_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select volt_description
+source install/setup.bash
+
+ros2 run volt_description volt_run_all.py \
+  --physical \
+  --serial-port /dev/ttyUSB0
+
+
+
+
+  ///////////////////////////////
+
+  ls -l /dev/ttyUSB* /dev/ttyACM*
+
+
+
+  ///////////////////////////////
+
+cd /home/ros2/Documents/volt_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 topic echo --once /volt/serial_status --field data
+ros2 control list_controllers

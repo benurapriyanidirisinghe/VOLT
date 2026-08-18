@@ -1,18 +1,32 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    gui = LaunchConfiguration("gui")
     serial_port = LaunchConfiguration("serial_port")
     baud_rate = LaunchConfiguration("baud_rate")
     auto_ready_pose = LaunchConfiguration("auto_ready_pose")
+    use_sim_time = LaunchConfiguration("use_sim_time")
     auto_arm = LaunchConfiguration("auto_arm")
     dry_run = LaunchConfiguration("dry_run")
     hardware_enabled = LaunchConfiguration("hardware_enabled")
     calibration_file = LaunchConfiguration("calibration_file")
+    physical_fast_trot_config_file = LaunchConfiguration(
+        "physical_fast_trot_config_file"
+    )
+    real_robot_profiles_file = LaunchConfiguration("real_robot_profiles_file")
+    emote_config_file = LaunchConfiguration("emote_config_file")
+    enable_physical_tests = LaunchConfiguration("enable_physical_tests")
+    fast_trot_diagnostic = LaunchConfiguration("fast_trot_diagnostic")
+    fast_trot_diagnostic_output = LaunchConfiguration(
+        "fast_trot_diagnostic_output"
+    )
     config_file = PathJoinSubstitution([
         FindPackageShare("volt_description"),
         "config",
@@ -26,7 +40,30 @@ def generate_launch_description():
         output="screen",
         parameters=[
             config_file,
-            {"auto_ready_pose": auto_ready_pose},
+            {
+                "auto_ready_pose": auto_ready_pose,
+                "use_sim_time": ParameterValue(
+                    use_sim_time,
+                    value_type=bool,
+                ),
+                "hardware_mode": True,
+                "control_rate": 100.0,
+                # Hobby servos provide no JointState feedback. Seed the
+                # canonical WALK_POSE that exactly matches the firmware's
+                # calibrated safe-start frame only in this hardware-only stack;
+                # router HOLD and Arduino ARM remain separate motion gates.
+                "open_loop_hardware": True,
+                "gait_config_file": config_file,
+                "physical_fast_trot_config_file": (
+                    physical_fast_trot_config_file
+                ),
+                "real_robot_profiles_file": real_robot_profiles_file,
+                "emote_config_file": emote_config_file,
+                "enable_physical_tests": ParameterValue(
+                    enable_physical_tests,
+                    value_type=bool,
+                ),
+            },
         ],
     )
 
@@ -42,6 +79,7 @@ def generate_launch_description():
             "dry_run": dry_run,
             "hardware_enabled": hardware_enabled,
             "calibration_file": calibration_file,
+            "use_sim_time": False,
         }],
     )
 
@@ -52,7 +90,37 @@ def generate_launch_description():
         output="screen",
     )
 
+    control_gui = Node(
+        package="volt_description",
+        executable="volt_control_gui.py",
+        name="volt_control_gui",
+        output="screen",
+        condition=IfCondition(gui),
+    )
+
+    diagnostic = Node(
+        package="volt_description",
+        executable="volt_fast_trot_diagnostic.py",
+        name="volt_fast_trot_diagnostic",
+        output="screen",
+        condition=IfCondition(fast_trot_diagnostic),
+        parameters=[{
+            "output_path": fast_trot_diagnostic_output,
+            "auto_start": True,
+            "hardware_enabled": False,
+            "use_sim_time": ParameterValue(
+                use_sim_time,
+                value_type=bool,
+            ),
+        }],
+    )
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "gui",
+            default_value="false",
+            description="Start the guided VOLT physical-robot control GUI",
+        ),
         DeclareLaunchArgument(
             "serial_port",
             default_value="/dev/ttyUSB0",
@@ -60,7 +128,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "baud_rate",
-            default_value="115200",
+            default_value="250000",
             description="Arduino firmware baud rate",
         ),
         DeclareLaunchArgument(
@@ -69,9 +137,17 @@ def generate_launch_description():
             description="Automatically move from loaded zero pose to walk-ready pose",
         ),
         DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="false",
+            description="Use an external simulation clock when one is available",
+        ),
+        DeclareLaunchArgument(
             "auto_arm",
             default_value="false",
-            description="Send ARM to Arduino after connecting",
+            description=(
+                "Request ARM after handshake and a fresh certification of "
+                "the stopped calibrated WALK_POSE"
+            ),
         ),
         DeclareLaunchArgument(
             "dry_run",
@@ -92,7 +168,56 @@ def generate_launch_description():
             ]),
             description="Servo calibration YAML file",
         ),
+        DeclareLaunchArgument(
+            "physical_fast_trot_config_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("volt_description"),
+                "config",
+                "physical_fast_trot.yaml",
+            ]),
+            description=(
+                "Dedicated physical fast-trot YAML; simulation profile is "
+                "never loaded from this file"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "real_robot_profiles_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("volt_description"),
+                "config",
+                "real_robot_profiles.yaml",
+            ]),
+            description="Validated real-robot tuning profiles",
+        ),
+        DeclareLaunchArgument(
+            "emote_config_file",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("volt_description"),
+                "config",
+                "cartesian_emotes.yaml",
+            ]),
+            description="Validated Cartesian emote catalog",
+        ),
+        DeclareLaunchArgument(
+            "enable_physical_tests",
+            default_value="false",
+            description=(
+                "Enable the leased support-stand Cartesian test request topic"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "fast_trot_diagnostic",
+            default_value="false",
+            description="Passively record fast-trot status and canonical commands",
+        ),
+        DeclareLaunchArgument(
+            "fast_trot_diagnostic_output",
+            default_value="",
+            description="Optional diagnostic CSV path or output directory",
+        ),
         command_router,
         motion_controller,
         serial_bridge,
+        control_gui,
+        diagnostic,
     ])

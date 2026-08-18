@@ -5,6 +5,10 @@
 import math
 
 
+class KinematicsError(ValueError):
+    """Raised when a kinematic request cannot be represented safely."""
+
+
 JOINT_NAMES = [
     "front_left_shoulder",
     "front_left_leg",
@@ -59,42 +63,76 @@ JOINT_VELOCITY_LIMITS = [
 ]
 
 NOMINAL_FEET = {
-    "front_left": (0.11345038684192288, 0.10406215926080184, -0.1997001680746251),
-    "front_right": (0.1259983687011835, -0.10358886072408366, -0.19024208696423794),
-    "rear_left": (-0.13292013901093855, 0.10438791232172076, -0.20620979917023652),
-    "rear_right": (-0.11310127831089031, -0.1040760704101856, -0.19997815917115905),
+    "front_left": (0.113, 0.104, -NOMINAL_HEIGHT),
+    "front_right": (0.113, -0.104, -NOMINAL_HEIGHT),
+    "rear_left": (-0.113, 0.104, -NOMINAL_HEIGHT),
+    "rear_right": (-0.113, -0.104, -NOMINAL_HEIGHT),
 }
 
+# These are canonical URDF joint radians. Real-robot mounting and leveling
+# corrections belong in config/servo_calibration.yaml and are applied only by
+# volt_serial_bridge.py; putting hardware offsets here also tilts Gazebo.
 WALK_POSE = [
-    0.050, 0.499, -1.085,
-    -0.050, 0.499, -1.206,
-    0.050, 0.696, -0.921,
-    -0.050, 0.696, -1.081,
+    0.049620338014839456, 0.49919486687672665, -1.081211652844041,
+    -0.04962033801483968, 0.49919486687672665, -1.081211652844041,
+    0.049620338014839456, 0.695626658430574, -1.081211652844041,
+    -0.04962033801483968, 0.695626658430574, -1.081211652844041,
 ]
 
 SIT_POSE = [
-    0.548, 1.548, -2.600,
-    -0.548, 1.548, -2.600,
-    0.548, 1.548, -2.600,
-    -0.548, 1.548, -2.600,
+    0.548, 1.548, -2.490,
+    -0.548, 1.548, -2.490,
+    0.548, 1.548, -2.490,
+    -0.548, 1.548, -2.490,
 ]
 
 LEG_FOOT_MID_POSE = [
-    0.0, 0.800, -2.600,
-    0.0, 0.800, -2.600,
-    0.0, 0.800, -2.600,
-    0.0, 0.800, -2.600,
+    0.0, 0.800, -2.490,
+    0.0, 0.800, -2.490,
+    0.0, 0.800, -2.490,
+    0.0, 0.800, -2.490,
 ]
 
 LEG_FOOT_SIT_POSE = [
-    0.0, 1.548, -2.600,
-    0.0, 1.548, -2.600,
-    0.0, 1.548, -2.600,
-    0.0, 1.548, -2.600,
+    0.0, 1.548, -2.490,
+    0.0, 1.548, -2.490,
+    0.0, 1.548, -2.490,
+    0.0, 1.548, -2.490,
 ]
 
 
+def _finite_float(value, label="value"):
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise KinematicsError("%s is not numeric" % label) from exc
+    if not math.isfinite(result):
+        raise KinematicsError("%s is not finite" % label)
+    return result
+
+
+def _finite_vector(values, count, label):
+    try:
+        values = tuple(values)
+    except TypeError as exc:
+        raise KinematicsError("%s must be an iterable" % label) from exc
+    if len(values) != count:
+        raise KinematicsError(
+            "%s must contain exactly %d values" % (label, count)
+        )
+    return tuple(
+        _finite_float(value, "%s[%d]" % (label, index))
+        for index, value in enumerate(values)
+    )
+
+
 def clamp(value, lower, upper):
+    """Clamp one finite scalar, rejecting non-finite values instead of failing open."""
+    value = _finite_float(value)
+    lower = _finite_float(lower, "lower limit")
+    upper = _finite_float(upper, "upper limit")
+    if lower > upper:
+        raise KinematicsError("lower limit is greater than upper limit")
     return max(lower, min(upper, value))
 
 
@@ -119,7 +157,9 @@ def interpolate(start, target, proportion):
 
 def forward_leg(leg_name, angles):
     """Return a toe position in the shoulder-joint frame."""
-    shoulder, leg, foot = angles
+    if leg_name not in LEG_SIDE:
+        raise KinematicsError("unknown leg '%s'" % leg_name)
+    shoulder, leg, foot = _finite_vector(angles, 3, "%s angles" % leg_name)
     side = LEG_SIDE[leg_name]
 
     x_planar = -(
@@ -143,25 +183,44 @@ class LegIK:
     """Closed-form IK with workspace projection and joint limit protection."""
 
     def __init__(self, leg_name):
+        if leg_name not in LEG_SIDE:
+            raise KinematicsError("unknown leg '%s'" % leg_name)
         self.leg_name = leg_name
         self.side = LEG_SIDE[leg_name]
 
-    def project_target(self, target):
-        """Clamp unreachable toe targets before solving the joint angles."""
-        x, y, z = target
+    def project_target_with_diagnostics(self, target):
+        """Project one target into the VOLT workspace and describe every change."""
+        x, y, z = _finite_vector(target, 3, "%s target" % self.leg_name)
+        input_target = (x, y, z)
         hip_y = self.side * HIP_OFFSET
+        reasons = []
 
         yz_radius = math.hypot(y, z)
         minimum_yz = HIP_OFFSET + 1e-5
         if yz_radius < minimum_yz:
-            scale = minimum_yz / max(yz_radius, 1e-9)
-            y *= scale
-            z *= scale
+            reasons.extend(("foot_target_too_close_to_hip", "workspace_projection"))
+            if yz_radius < 1e-9:
+                # A zero y/z direction is undefined. Choose the mechanically
+                # neutral hip side and a tiny downward component deterministically.
+                y = hip_y
+                z = -math.sqrt(max(0.0, minimum_yz ** 2 - HIP_OFFSET ** 2))
+            else:
+                scale = minimum_yz / yz_radius
+                y *= scale
+                z *= scale
             yz_radius = minimum_yz
 
         z_planar = -math.sqrt(
             max(1e-10, yz_radius * yz_radius - HIP_OFFSET ** 2)
         )
+        if abs(z_planar) < 0.004:
+            reasons.append("near_singular_target")
+
+        denominator = HIP_OFFSET ** 2 + z_planar ** 2
+        cos_roll = (hip_y * y + z_planar * z) / denominator
+        sin_roll = (-z_planar * y + hip_y * z) / denominator
+        shoulder = math.atan2(sin_roll, cos_roll)
+
         down = -z_planar
         forward = -x
         reach = math.hypot(down, forward)
@@ -169,20 +228,58 @@ class LegIK:
         maximum_reach = UPPER_LEG_LENGTH + LOWER_LEG_LENGTH - 0.002
         projected_reach = clamp(reach, minimum_reach, maximum_reach)
         if abs(projected_reach - reach) > 1e-9:
-            scale = projected_reach / max(reach, 1e-9)
+            reasons.append("workspace_projection")
+            if reach < minimum_reach:
+                reasons.append("inside_minimum_reach")
+            if reach > maximum_reach:
+                reasons.append("outside_maximum_reach")
+            if reach < 1e-9:
+                reasons.append("near_singular_target")
+            scale = projected_reach / max(reach, 1e-12)
             down *= scale
             forward *= scale
 
-        return y, z, hip_y, z_planar, down, forward
+        # Reconstruct a target that exactly matches the projected planar reach.
+        # This keeps the diagnostic target consistent with forward kinematics.
+        projected_z_planar = -down
+        cos_roll = math.cos(shoulder)
+        sin_roll = math.sin(shoulder)
+        projected_y = cos_roll * hip_y - sin_roll * projected_z_planar
+        projected_z = sin_roll * hip_y + cos_roll * projected_z_planar
+        projected_target = (-forward, projected_y, projected_z)
 
-    def solve(self, target):
-        """Solve one leg and clamp hip, knee, and shoulder to safe limits."""
-        y, z, hip_y, z_planar, down, forward = self.project_target(target)
+        reasons = list(dict.fromkeys(reasons))
+        return {
+            "leg": self.leg_name,
+            "input_target": input_target,
+            "projected_target": projected_target,
+            "projected": bool(reasons),
+            "reasons": reasons,
+            "near_singular": "near_singular_target" in reasons,
+            "minimum_reach": minimum_reach,
+            "maximum_reach": maximum_reach,
+            "input_reach": reach,
+            "projected_reach": projected_reach,
+            "_shoulder": shoulder,
+            "_down": down,
+            "_forward": forward,
+        }
 
-        denominator = HIP_OFFSET ** 2 + z_planar ** 2
-        cos_roll = (hip_y * y + z_planar * z) / denominator
-        sin_roll = (-z_planar * y + hip_y * z) / denominator
-        shoulder = math.atan2(sin_roll, cos_roll)
+    def project_target(self, target):
+        """Return the legacy projection tuple used by existing callers."""
+        diagnostic = self.project_target_with_diagnostics(target)
+        _x, y, z = diagnostic["projected_target"]
+        hip_y = self.side * HIP_OFFSET
+        down = diagnostic["_down"]
+        forward = diagnostic["_forward"]
+        return y, z, hip_y, -down, down, forward
+
+    def solve_with_diagnostics(self, target):
+        """Solve one leg and return finite angles plus structured diagnostics."""
+        diagnostic = self.project_target_with_diagnostics(target)
+        shoulder = diagnostic.pop("_shoulder")
+        down = diagnostic.pop("_down")
+        forward = diagnostic.pop("_forward")
 
         cosine_foot = (
             down * down
@@ -196,11 +293,34 @@ class LegIK:
             UPPER_LEG_LENGTH + LOWER_LEG_LENGTH * math.cos(foot),
         )
 
-        return (
-            clamp(shoulder, *SHOULDER_LIMIT),
-            clamp(leg, *LEG_LIMIT),
-            clamp(foot, *FOOT_LIMIT),
+        raw_angles = (shoulder, leg, foot)
+        angles = (
+            clamp(raw_angles[0], *SHOULDER_LIMIT),
+            clamp(raw_angles[1], *LEG_LIMIT),
+            clamp(raw_angles[2], *FOOT_LIMIT),
         )
+        if not all(math.isfinite(value) for value in angles):
+            raise KinematicsError("%s IK produced a non-finite output" % self.leg_name)
+
+        joint_labels = ("shoulder", "leg", "foot")
+        clamped_joints = [
+            "%s_%s" % (self.leg_name, label)
+            for label, raw, safe in zip(joint_labels, raw_angles, angles)
+            if abs(raw - safe) > 1e-12
+        ]
+        if clamped_joints:
+            diagnostic["projected"] = True
+            diagnostic["reasons"] = list(diagnostic["reasons"]) + [
+                "joint_limit_clamping"
+            ]
+        diagnostic["raw_angles"] = raw_angles
+        diagnostic["angles"] = angles
+        diagnostic["clamped_joints"] = clamped_joints
+        return angles, diagnostic
+
+    def solve(self, target):
+        """Solve one leg and clamp hip, knee, and shoulder to safe limits."""
+        return self.solve_with_diagnostics(target)[0]
 
 
 def inverse_leg(leg_name, target):
@@ -208,8 +328,16 @@ def inverse_leg(leg_name, target):
     return LegIK(leg_name).solve(target)
 
 
+def inverse_leg_diagnostic(leg_name, target):
+    """Return ``(angles, diagnostic)`` without changing the legacy IK API."""
+    return LegIK(leg_name).solve_with_diagnostics(target)
+
+
 def rotation_matrix(roll, pitch, yaw):
     """Return a Z-Y-X body rotation matrix."""
+    roll = _finite_float(roll, "body roll")
+    pitch = _finite_float(pitch, "body pitch")
+    yaw = _finite_float(yaw, "body yaw")
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cy, sy = math.cos(yaw), math.sin(yaw)
@@ -227,7 +355,57 @@ def transpose_multiply(matrix, vector):
     )
 
 
-def feet_to_joint_positions(
+def matrix_multiply(matrix, vector):
+    return tuple(
+        sum(matrix[row][column] * vector[column] for column in range(3))
+        for row in range(3)
+    )
+
+
+def joint_positions_to_feet(
+    positions,
+    height=NOMINAL_HEIGHT,
+    body_x=0.0,
+    body_y=0.0,
+    roll=0.0,
+    pitch=0.0,
+    yaw=0.0,
+):
+    """Forward-kinematics inverse of ``feet_to_joint_positions``.
+
+    This lets gait startup inherit the controller's current commanded/measured
+    pose instead of jumping to a hard-coded nominal foot dictionary.
+    """
+    positions = _finite_vector(
+        positions,
+        len(JOINT_NAMES),
+        "joint positions",
+    )
+    height = _finite_float(height, "body height")
+    body_x = _finite_float(body_x, "body x")
+    body_y = _finite_float(body_y, "body y")
+    rotation = rotation_matrix(roll, pitch, yaw)
+    body_translation = (body_x, body_y, height - NOMINAL_HEIGHT)
+    feet = {}
+    for index, leg_name in enumerate(LEG_ORDER):
+        shoulder_relative = forward_leg(
+            leg_name,
+            positions[index * 3:index * 3 + 3],
+        )
+        hip = HIP_ORIGINS[leg_name]
+        body_relative = tuple(
+            shoulder_relative[axis] + hip[axis]
+            for axis in range(3)
+        )
+        shifted = matrix_multiply(rotation, body_relative)
+        feet[leg_name] = tuple(
+            shifted[axis] + body_translation[axis]
+            for axis in range(3)
+        )
+    return feet
+
+
+def feet_to_joint_positions_diagnostic(
     feet,
     height=NOMINAL_HEIGHT,
     body_x=0.0,
@@ -236,18 +414,50 @@ def feet_to_joint_positions(
     pitch=0.0,
     yaw=0.0,
 ):
-    """Convert body/local foot positions into all 12 joint commands.
+    """Convert foot targets into finite joint commands and IK diagnostics.
 
     Gait code may lock feet in world coordinates during stance. Before IK, those
     world footholds must be transformed back into this body/local frame so the
     solver sees the target relative to the moving body and shoulder origin.
     """
+    if not isinstance(feet, dict):
+        raise KinematicsError("feet must be a leg-name mapping")
+    missing = [leg for leg in LEG_ORDER if leg not in feet]
+    if missing:
+        raise KinematicsError("feet mapping is missing: %s" % missing)
+    height = _finite_float(height, "body height")
+    body_x = _finite_float(body_x, "body x")
+    body_y = _finite_float(body_y, "body y")
+    roll = _finite_float(roll, "body roll")
+    pitch = _finite_float(pitch, "body pitch")
+    yaw = _finite_float(yaw, "body yaw")
+
     rotation = rotation_matrix(roll, pitch, yaw)
     body_translation = (body_x, body_y, height - NOMINAL_HEIGHT)
     positions = []
+    leg_diagnostics = {}
+    had_non_finite_input = False
 
     for leg_name in LEG_ORDER:
-        foot = feet[leg_name]
+        try:
+            raw_foot = tuple(feet[leg_name])
+        except TypeError as exc:
+            raise KinematicsError("%s foot must be an iterable" % leg_name) from exc
+        if len(raw_foot) != 3:
+            raise KinematicsError("%s foot must contain exactly 3 values" % leg_name)
+        safe_foot = []
+        invalid_input = False
+        for index, value in enumerate(raw_foot):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = float("nan")
+            if not math.isfinite(value):
+                invalid_input = True
+                value = NOMINAL_FEET[leg_name][index]
+            safe_foot.append(value)
+        foot = tuple(safe_foot)
+        had_non_finite_input = had_non_finite_input or invalid_input
         shifted = tuple(
             foot[index] - body_translation[index]
             for index in range(3)
@@ -258,6 +468,51 @@ def feet_to_joint_positions(
             body_relative[index] - hip[index]
             for index in range(3)
         )
-        positions.extend(inverse_leg(leg_name, shoulder_relative))
+        angles, diagnostic = inverse_leg_diagnostic(leg_name, shoulder_relative)
+        if invalid_input:
+            diagnostic["projected"] = True
+            diagnostic["reasons"] = list(dict.fromkeys(
+                ["non_finite_input", "workspace_projection"]
+                + list(diagnostic["reasons"])
+            ))
+            diagnostic["input_was_non_finite"] = True
+        positions.extend(angles)
+        leg_diagnostics[leg_name] = diagnostic
 
+    if len(positions) != len(JOINT_NAMES) or not all(
+        math.isfinite(value) for value in positions
+    ):
+        raise KinematicsError("whole-body IK did not produce 12 finite joints")
+
+    projected_targets = [
+        leg for leg in LEG_ORDER if leg_diagnostics[leg]["projected"]
+    ]
+    diagnostics = {
+        "projected_targets": projected_targets,
+        "legs": leg_diagnostics,
+        "non_finite_input": had_non_finite_input,
+        "non_finite_output": False,
+    }
+    return positions, diagnostics
+
+
+def feet_to_joint_positions(
+    feet,
+    height=NOMINAL_HEIGHT,
+    body_x=0.0,
+    body_y=0.0,
+    roll=0.0,
+    pitch=0.0,
+    yaw=0.0,
+):
+    """Compatibility wrapper returning only the canonical 12 joint radians."""
+    positions, _diagnostics = feet_to_joint_positions_diagnostic(
+        feet,
+        height=height,
+        body_x=body_x,
+        body_y=body_y,
+        roll=roll,
+        pitch=pitch,
+        yaw=yaw,
+    )
     return positions

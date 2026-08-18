@@ -5,6 +5,7 @@
 <xacro:include filename="$(find volt_description)/urdf/gazebo.xacro"/>
 
 <xacro:arg name="sim_backend" default="gz"/>
+<xacro:arg name="actuator_profile" default="simulation"/>
 
   <material name="yellow">
     <color rgba="0.92 0.83 0.0 1"/>
@@ -17,6 +18,18 @@
   </material>
 
   <!-- Params -->
+
+  <!-- Keep the proven simulation profile as default.  The opt-in hardware
+       profile matches the production firmware's 120 deg/s channel slew and
+       uses a less idealized effort/damping envelope without changing ROS/IK
+       joint limits or physical calibration. -->
+  <xacro:property name="hardware_actuators" value="${'$(arg actuator_profile)' == 'td8130mg'}"/>
+  <xacro:property name="shoulder_velocity" value="${2.0}"/>
+  <xacro:property name="leg_velocity" value="${2.0944 if hardware_actuators else 3.0}"/>
+  <xacro:property name="foot_velocity" value="${2.0944 if hardware_actuators else 4.5}"/>
+  <xacro:property name="joint_effort" value="${6.0 if hardware_actuators else 20.0}"/>
+  <xacro:property name="joint_damping" value="${0.9 if hardware_actuators else 0.6}"/>
+  <xacro:property name="joint_friction" value="${0.15 if hardware_actuators else 0.1}"/>
 
   <xacro:property name="body_length" value="0.140" />
   <xacro:property name="body_width" value="0.110" />
@@ -81,8 +94,8 @@
       <child link="${pos}_shoulder_link"/>
       <axis xyz="1 0 0"/>
       <origin rpy="0 0 0" xyz="${shiftx} ${shifty} 0"/>
-      <limit effort="20.0" lower="-0.548" upper="0.548" velocity="2.0"/>
-      <dynamics damping="0.6" friction="0.1"/>
+      <limit effort="${joint_effort}" lower="-0.548" upper="0.548" velocity="${shoulder_velocity}"/>
+      <dynamics damping="${joint_damping}" friction="${joint_friction}"/>
     </joint>
   </xacro:macro>
 
@@ -144,8 +157,8 @@
       <child link="${pos}_leg_link"/>
       <axis xyz="0 1 0"/>
       <origin rpy="0 0 0" xyz="0 ${shift} 0"/>
-      <limit effort="20.0" lower="-2.666" upper="1.548" velocity="3.0"/>
-      <dynamics damping="0.6" friction="0.1"/>
+      <limit effort="${joint_effort}" lower="-2.666" upper="1.548" velocity="${leg_velocity}"/>
+      <dynamics damping="${joint_damping}" friction="${joint_friction}"/>
     </joint>
 
     <joint name="${pos}_leg_cover_joint" type="fixed">
@@ -191,8 +204,8 @@
       <child link="${pos}_foot_link"/>
       <axis xyz="0 1 0"/>
       <origin rpy="0 0 0" xyz="0 0 -${leg_length}"/>
-      <limit effort="20.0" lower="-2.6" upper="0.1" velocity="4.5"/>
-      <dynamics damping="0.6" friction="0.1"/>
+      <limit effort="${joint_effort}" lower="-2.6" upper="0.1" velocity="${foot_velocity}"/>
+      <dynamics damping="${joint_damping}" friction="${joint_friction}"/>
     </joint>
   </xacro:macro>
 

@@ -1,15 +1,39 @@
 #!/usr/bin/env python3
 
-import time
+import math
 
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 
 from volt_kinematics import JOINT_NAMES
 
 
 OWNERS = ("MOTION", "MANUAL", "CALIBRATION", "HOLD", "DISABLED")
+
+
+def validate_joint_values(values, expected_count=len(JOINT_NAMES)):
+    """Return a finite float command or raise ``ValueError`` without publishing."""
+    try:
+        values = list(values)
+    except TypeError as exc:
+        raise ValueError("joint command must be an iterable") from exc
+    if len(values) != expected_count:
+        raise ValueError(
+            "expected %d joints, got %d" % (expected_count, len(values))
+        )
+
+    validated = []
+    for index, value in enumerate(values):
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("joint %d is not numeric" % index) from exc
+        if not math.isfinite(value):
+            raise ValueError("joint %d is not finite" % index)
+        validated.append(value)
+    return validated
 
 
 class JointCommandRouter(Node):
@@ -22,7 +46,7 @@ class JointCommandRouter(Node):
         self.declare_parameter("stale_timeout", 1.0)
 
         self.owner = "HOLD"
-        self.last_pose = [0.0 for _ in JOINT_NAMES]
+        self.last_pose = None
         self.last_owner_command_time = 0.0
         self.stale_timeout = float(self.get_parameter("stale_timeout").value)
 
@@ -39,6 +63,7 @@ class JointCommandRouter(Node):
         self.create_subscription(Float64MultiArray, "/volt/joint_commands/motion", self.motion_callback, 10)
         self.create_subscription(Float64MultiArray, "/volt/joint_commands/manual", self.manual_callback, 10)
         self.create_subscription(Float64MultiArray, "/volt/joint_commands/calibration", self.calibration_callback, 10)
+        self.create_subscription(JointState, "/joint_states", self.joint_state_callback, 20)
         self.create_timer(0.05, self.timer_callback)
 
         self.get_logger().info("Joint command router owns %s and %s." % (output_topic, controller_topic))
@@ -55,18 +80,18 @@ class JointCommandRouter(Node):
             self.get_logger().info("Command owner changed %s -> %s." % (self.owner, requested))
         self.owner = requested
         self.last_owner_command_time = self.now_seconds()
-        if requested in ("HOLD", "DISABLED"):
+        if requested == "HOLD" and self.last_pose is not None:
             self.publish_pose(self.last_pose)
 
     def validate_pose(self, message, source):
-        if len(message.data) != len(JOINT_NAMES):
+        try:
+            return validate_joint_values(message.data)
+        except ValueError as exc:
             self.get_logger().warning(
-                "Ignoring %s command: expected %d joints, got %d."
-                % (source, len(JOINT_NAMES), len(message.data)),
+                "Ignoring %s command: %s." % (source, exc),
                 throttle_duration_sec=2.0,
             )
             return None
-        return [float(value) for value in message.data]
 
     def source_callback(self, message, source):
         if self.owner != source:
@@ -87,7 +112,22 @@ class JointCommandRouter(Node):
     def calibration_callback(self, message):
         self.source_callback(message, "CALIBRATION")
 
+    def joint_state_callback(self, message):
+        """Seed HOLD from measured feedback without ever emitting startup zeros."""
+        by_name = dict(zip(message.name, message.position))
+        if not all(name in by_name for name in JOINT_NAMES):
+            return
+        try:
+            measured = validate_joint_values(
+                [by_name[name] for name in JOINT_NAMES]
+            )
+        except ValueError:
+            return
+        if self.last_pose is None or self.owner in ("HOLD", "DISABLED"):
+            self.last_pose = measured
+
     def publish_pose(self, pose):
+        pose = validate_joint_values(pose)
         message = Float64MultiArray()
         message.data = list(pose)
         self.output_publisher.publish(message)
@@ -99,9 +139,21 @@ class JointCommandRouter(Node):
             if self.owner != "HOLD" and age > self.stale_timeout:
                 self.owner = "HOLD"
                 self.get_logger().warning("Owner command stale; holding last pose.")
+            # Reassert HOLD rather than publishing only on the transition.  A
+            # controller or serial consumer that reconnects while the router is
+            # already holding must receive the last finite canonical pose too.
+            if self.owner == "HOLD" and self.last_pose is not None:
                 self.publish_pose(self.last_pose)
         status = String()
-        status.data = "owner=%s" % self.owner
+        status.data = (
+            "owner=%s controller_connected=%d output_subscribers=%d pose_valid=%d"
+            % (
+                self.owner,
+                int(self.controller_publisher.get_subscription_count() > 0),
+                self.output_publisher.get_subscription_count(),
+                int(self.last_pose is not None),
+            )
+        )
         self.status_publisher.publish(status)
 
 

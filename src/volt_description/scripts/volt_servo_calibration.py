@@ -101,9 +101,13 @@ class ServoCalibrationTable:
                 raise CalibrationError("%s min_pulse_us must be less than max_pulse_us" % joint_name)
             if min_pulse < 100 or max_pulse > 3000:
                 raise CalibrationError("%s pulse widths outside conservative bounds" % joint_name)
-            neutral_with_trim = neutral + trim
-            if not min_deg <= neutral_with_trim <= max_deg:
-                raise CalibrationError("%s neutral_deg + trim_deg outside safe range" % joint_name)
+            # Keep the physical neutral itself valid.  A mounting/leveling trim
+            # may make URDF zero unreachable on a real joint (for example a
+            # foot whose neutral is already 180 degrees), so the effective
+            # neutral is allowed outside this range. Runtime output is always
+            # clamped by ros_radians_to_servo_degrees().
+            if not min_deg <= neutral <= max_deg:
+                raise CalibrationError("%s neutral_deg outside safe range" % joint_name)
 
             channels.append(channel)
             servos[joint_name] = ServoCalibration(
@@ -122,6 +126,11 @@ class ServoCalibrationTable:
             raise CalibrationError("PCA channels must be unique")
         if len(channels) != len(JOINT_NAMES):
             raise CalibrationError("exactly 12 channels are required")
+        expected_channels = set(range(len(JOINT_NAMES)))
+        if set(channels) != expected_channels:
+            raise CalibrationError(
+                "PCA channels must be the exact 12-channel FRAME range 0..11"
+            )
         return cls(joint_order, servos)
 
     def ros_radians_to_servo_degrees(self, joint_name, radians):

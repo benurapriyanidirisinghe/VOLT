@@ -18,13 +18,17 @@
     </plugin>
 
     <gravity>0 0 -9.81</gravity>
-    <physics name="1ms" type="ignored">
-      <max_step_size>0.001</max_step_size>
+    <!-- 166 Hz still samples every 100 Hz gait command and keeps this
+         GUI-bound simulation close to wall-clock time on battery power. -->
+    <physics name="166hz" type="ignored">
+      <max_step_size>0.006024096385542169</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
 
     <light name="sun" type="directional">
-      <cast_shadows>true</cast_shadows>
+      <!-- Shadows add substantial render load on the low-power GPU used by
+           the physical-robot workstation, without affecting dynamics. -->
+      <cast_shadows>false</cast_shadows>
       <pose>0 0 10 0 0 0</pose>
       <diffuse>0.8 0.8 0.8 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>

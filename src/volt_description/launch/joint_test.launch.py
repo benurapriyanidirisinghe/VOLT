@@ -38,6 +38,8 @@ def generate_launch_description():
             "port": serial_port,
             "baud_rate": baud_rate,
             "auto_arm": auto_arm,
+            # This suspended single-joint tool has no motion-controller status.
+            "require_motion_safe_to_arm": False,
             "dry_run": dry_run,
             "hardware_enabled": use_hardware,
             "calibration_file": calibration_file,
@@ -66,7 +68,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "baud_rate",
-            default_value="115200",
+            default_value="57600",
             description="Arduino firmware baud rate",
         ),
         DeclareLaunchArgument(

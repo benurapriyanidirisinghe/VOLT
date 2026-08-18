@@ -1,6 +1,8 @@
 controller_manager:
   ros__parameters:
-    update_rate: 500
+    # Match the Gazebo Sim physics step. A faster controller loop cannot be
+    # serviced by the simulator and only adds scheduling overhead.
+    update_rate: 166
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
@@ -61,5 +63,5 @@ joint_trajectory_controller:
 gz_ros2_control:
   ros__parameters:
     # Position commands are applied as a first-order joint velocity target.
-    # 0.35 keeps the legs responsive without the oscillation risk of gains > 1.
-    position_proportional_gain: 0.35
+    # Keep this aligned with the installed Humble/Fortress plugin default.
+    position_proportional_gain: 0.1

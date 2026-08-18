@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import re
 import sys
 import unittest
 from copy import deepcopy
@@ -10,7 +11,16 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from volt_kinematics import JOINT_NAMES
+from volt_kinematics import (
+    JOINT_NAMES,
+    LEG_FOOT_MID_POSE,
+    LEG_FOOT_SIT_POSE,
+    NOMINAL_FEET,
+    SIT_POSE,
+    WALK_POSE,
+    feet_to_joint_positions,
+    feet_to_joint_positions_diagnostic,
+)
 from volt_servo_calibration import (
     CalibrationError,
     ServoCalibrationTable,
@@ -89,6 +99,16 @@ class ServoCalibrationTests(unittest.TestCase):
         raw["servos"]["front_left_leg"]["trim_deg"] = 5.0
         table = self.table(raw)
         self.assertAlmostEqual(table.ros_radians_to_servo_degrees("front_left_leg", 0.0), 95.0)
+
+    def test_trim_can_make_urdf_zero_unreachable_but_output_stays_safe(self):
+        raw = deepcopy(BASE)
+        raw["servos"]["rear_left_foot"]["neutral_deg"] = 180.0
+        raw["servos"]["rear_left_foot"]["trim_deg"] = 9.0
+        table = self.table(raw)
+        self.assertEqual(
+            table.ros_radians_to_servo_degrees("rear_left_foot", 0.0),
+            180.0,
+        )
 
     def test_clamping(self):
         raw = deepcopy(BASE)
@@ -194,7 +214,7 @@ class ServoCalibrationTests(unittest.TestCase):
             ROOT / "config" / "servo_calibration.yaml"
         )
         expected_directions = {
-            "front_left_shoulder": 1,
+            "front_left_shoulder": -1,
             "front_left_leg": 1,
             "front_left_foot": -1,
             "front_right_shoulder": -1,
@@ -209,6 +229,25 @@ class ServoCalibrationTests(unittest.TestCase):
         }
         for joint_name in JOINT_NAMES:
             self.assertEqual(repo_table.servos[joint_name].direction, expected_directions[joint_name])
+
+    def test_front_left_shoulder_matches_measured_physical_polarity(self):
+        repo_table = ServoCalibrationTable.from_file(
+            ROOT / "config" / "servo_calibration.yaml"
+        )
+        negative = repo_table.ros_radians_to_servo_degrees(
+            "front_left_shoulder",
+            -0.05,
+        )
+        zero = repo_table.ros_radians_to_servo_degrees(
+            "front_left_shoulder",
+            0.0,
+        )
+        positive = repo_table.ros_radians_to_servo_degrees(
+            "front_left_shoulder",
+            0.05,
+        )
+        self.assertGreater(negative, zero)
+        self.assertGreater(zero, positive)
 
     def test_repo_pca_mapping_matches_measured_robot(self):
         repo_table = ServoCalibrationTable.from_file(
@@ -230,6 +269,98 @@ class ServoCalibrationTests(unittest.TestCase):
         }
         for joint_name, channel in expected_channels.items():
             self.assertEqual(repo_table.servos[joint_name].pca_channel, channel)
+
+    def test_walk_pose_is_canonical_nominal_kinematics(self):
+        solved = feet_to_joint_positions(NOMINAL_FEET)
+        for expected, actual in zip(solved, WALK_POSE):
+            self.assertAlmostEqual(expected, actual, places=12)
+        self.assertEqual(NOMINAL_FEET["front_left"][2], NOMINAL_FEET["front_right"][2])
+        self.assertEqual(NOMINAL_FEET["front_left"][2], NOMINAL_FEET["rear_left"][2])
+        self.assertEqual(NOMINAL_FEET["front_left"][2], NOMINAL_FEET["rear_right"][2])
+
+    def test_repo_trims_preserve_previous_physical_stand(self):
+        repo_table = ServoCalibrationTable.from_file(
+            ROOT / "config" / "servo_calibration.yaml"
+        )
+        previously_leveled_pose = [
+            0.050, 0.499, -1.085,
+            -0.050, 0.499, -1.206,
+            0.050, 0.696, -0.921,
+            -0.050, 0.696, -1.081,
+        ]
+        for joint_name, canonical_rad, previous_rad in zip(
+            JOINT_NAMES, WALK_POSE, previously_leveled_pose
+        ):
+            servo = repo_table.servos[joint_name]
+            previous_output = servo.neutral_deg + servo.direction * math.degrees(previous_rad)
+            previous_output = max(servo.min_deg, min(servo.max_deg, previous_output))
+            migrated_output = repo_table.ros_radians_to_servo_degrees(
+                joint_name, canonical_rad
+            )
+            self.assertAlmostEqual(previous_output, migrated_output, delta=0.006)
+
+    def test_repo_calibration_does_not_clamp_canonical_sit_transitions(self):
+        repo_table = ServoCalibrationTable.from_file(
+            ROOT / "config" / "servo_calibration.yaml"
+        )
+        poses = {
+            "leg_foot_mid": LEG_FOOT_MID_POSE,
+            "leg_foot_sit": LEG_FOOT_SIT_POSE,
+            "sit": SIT_POSE,
+        }
+        for pose_name, pose in poses.items():
+            with self.subTest(pose=pose_name):
+                _frame, details = repo_table.channel_frame_from_positions(
+                    named_positions_from_ordered(pose)
+                )
+                clamped_joints = [
+                    detail["joint"] for detail in details if detail["clamped"]
+                ]
+                self.assertEqual(clamped_joints, [])
+
+    def test_repo_calibration_does_not_clamp_natural_cartesian_sit(self):
+        repo_table = ServoCalibrationTable.from_file(
+            ROOT / "config" / "servo_calibration.yaml"
+        )
+        pose, diagnostics = feet_to_joint_positions_diagnostic(
+            NOMINAL_FEET,
+            height=0.145,
+            body_x=-0.020,
+            pitch=math.radians(-10.0),
+        )
+        self.assertEqual(diagnostics["projected_targets"], [])
+        _frame, details = repo_table.channel_frame_from_positions(
+            named_positions_from_ordered(pose)
+        )
+        self.assertEqual(
+            [detail["joint"] for detail in details if detail["clamped"]],
+            [],
+        )
+
+    def test_firmware_safe_start_matches_calibrated_stand(self):
+        repo_table = ServoCalibrationTable.from_file(
+            ROOT / "config" / "servo_calibration.yaml"
+        )
+        expected, _details = repo_table.channel_frame_from_positions(
+            dict(zip(JOINT_NAMES, WALK_POSE))
+        )
+        firmware_path = (
+            ROOT.parents[1]
+            / "firmware"
+            / "volt_arduino_pca9685"
+            / "volt_arduino_pca9685.ino"
+        )
+        firmware = firmware_path.read_text(encoding="utf-8")
+        match = re.search(
+            r"const float CHANNEL_SAFE_START_DEG\[CHANNEL_COUNT\] = \{(.*?)\};",
+            firmware,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        actual = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", match.group(1))]
+        self.assertEqual(len(actual), 12)
+        for expected_degrees, actual_degrees in zip(expected, actual):
+            self.assertAlmostEqual(expected_degrees, actual_degrees, delta=0.001)
 
 
 if __name__ == "__main__":

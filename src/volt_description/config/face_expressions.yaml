@@ -1,0 +1,122 @@
+schema_version: 1
+defaults:
+  expression: idle
+  brightness: 80
+  speed_ms: 2200
+
+# The firmware owns animation timing.  These presets are the single tunable
+# source used by the GUI and automatic robot/emote expression selection.
+expressions:
+  neutral:
+    color: [80, 180, 255]
+    effect: breathe
+    brightness: 70
+    speed_ms: 3000
+  idle:
+    color: [0, 120, 255]
+    effect: breathe
+    brightness: 80
+    speed_ms: 2200
+  happy:
+    color: [255, 180, 20]
+    effect: pulse
+    brightness: 100
+    speed_ms: 1100
+  excited:
+    color: [0, 255, 255]
+    alternate_color: [255, 0, 180]
+    effect: chase
+    brightness: 120
+    speed_ms: 120
+  love:
+    color: [255, 20, 80]
+    effect: pulse
+    brightness: 110
+    speed_ms: 480
+  sad:
+    color: [20, 50, 180]
+    effect: breathe
+    brightness: 45
+    speed_ms: 3000
+  angry:
+    color: [255, 0, 0]
+    effect: pulse
+    brightness: 120
+    speed_ms: 320
+  alert:
+    color: [255, 0, 0]
+    alternate_color: [255, 90, 0]
+    effect: alternate
+    brightness: 130
+    speed_ms: 220
+  thinking:
+    color: [150, 40, 255]
+    effect: loading
+    brightness: 85
+    speed_ms: 180
+  confused:
+    color: [170, 40, 255]
+    alternate_color: [255, 180, 0]
+    effect: alternate
+    brightness: 90
+    speed_ms: 600
+  sleeping:
+    color: [0, 20, 80]
+    effect: breathe
+    brightness: 25
+    speed_ms: 3600
+  success:
+    color: [0, 255, 80]
+    effect: blink
+    brightness: 110
+    speed_ms: 260
+  error:
+    color: [255, 0, 0]
+    effect: blink
+    brightness: 140
+    speed_ms: 140
+  scared:
+    color: [180, 220, 255]
+    effect: blink
+    brightness: 150
+    speed_ms: 100
+  playful:
+    color: [255, 255, 255]
+    effect: rainbow
+    brightness: 100
+    speed_ms: 90
+  shutdown:
+    color: [0, 0, 0]
+    effect: "off"
+    brightness: 0
+    speed_ms: 900
+
+automatic_mappings:
+  emotes:
+    push_ups: angry
+    body_roll: playful
+    wave_left: happy
+    wave_right: happy
+    heart: love
+    bow: happy
+    happy_dance: excited
+    nod: neutral
+    shake_no: confused
+    stretch: happy
+    look_left: thinking
+    look_right: thinking
+    dance: excited
+    sleep: sleeping
+    lie_down: sleeping
+    wake: success
+    wake_up: success
+  states:
+    sitting_down: neutral
+    sitting: neutral
+    standing_up: success
+    walking: idle
+    calibration: thinking
+  safety:
+    emergency: error
+    fault: error
+    low_voltage: alert
