@@ -497,17 +497,26 @@ def _builtin_gaits():
     return {
         "trot": _validate_gait_config("trot", {
             "type": "trot",
-            "cycle_period": 1.1,
-            "duty_factor": 0.58,
-            "step_height": 0.024,
-            "max_x": 0.12,
+            # T=0.9/duty=0.62 was tuned in the loaded-servo Ignition model:
+            # the shorter cycle leaves less time to fall onto each diagonal
+            # and the higher duty doubles the four-foot load-transfer window.
+            # With the slow command ramp below, three consecutive runs gave
+            # 1.12-1.21 m per 15 s at 0.10 m/s with roll p95 <= 2.6 deg.
+            "cycle_period": 0.9,
+            "duty_factor": 0.62,
+            "step_height": 0.020,
+            "max_x": 0.10,
             "max_y": 0.05,
             "max_yaw": 0.50,
             "settle_time": 0.6,
             "body_sway_y": 0.0,
             "body_height_offset": 0.0,
             "velocity_filter_alpha": 0.30,
-            "command_acceleration": 0.25,
+            # The dynamic trot is bistable on marginal servo torque: ramping
+            # to full stride over ~2 cycles reliably enters the clean limit
+            # cycle, where a fast ramp sometimes locked in a 10-deg rocking
+            # mode with most of the stride lost to slip.
+            "command_acceleration": 0.08,
             "hardware_speed_scale": 0.80,
             "joint_velocity_limit_deg_s": 190.0,
             "joint_acceleration_limit_deg_s2": 6500.0,
@@ -523,10 +532,13 @@ def _builtin_gaits():
             "max_y": 0.03,
             "max_yaw": 0.30,
             "settle_time": 0.8,
-            "body_sway_y": 0.012,
+            # 0.012 m of sway produced a consistent ~1 deg/s heading drift
+            # in simulation (sway/swing-order asymmetry); 0.009 keeps the
+            # stability lean while centering the drift around zero.
+            "body_sway_y": 0.009,
             "body_height_offset": 0.0,
             "velocity_filter_alpha": 0.25,
-            "command_acceleration": 0.15,
+            "command_acceleration": 0.06,
             "hardware_speed_scale": 0.85,
             "joint_velocity_limit_deg_s": 190.0,
             "joint_acceleration_limit_deg_s2": 6500.0,

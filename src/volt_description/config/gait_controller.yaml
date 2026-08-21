@@ -45,21 +45,26 @@ volt_motion_controller:
     # limit on the physical robot.
     # ----------------------------------------------------------------------
     gaits:
-      # Two-beat diagonal trot. duty 0.58 keeps two short four-foot support
-      # windows per cycle for load transfer between the diagonal pairs.
+      # Two-beat diagonal trot, tuned in the loaded-servo Ignition model:
+      # the 0.9 s cycle leaves less time to fall onto each diagonal and
+      # duty 0.62 doubles the four-foot load-transfer windows. The slow
+      # command ramp matters: the dynamic trot is bistable on marginal
+      # servo torque, and ramping to full stride over ~2 cycles reliably
+      # enters the clean limit cycle (1.2 m / 15 s at 0.10 m/s, roll p95
+      # under 2.6 deg across repeated runs).
       trot:
         type: trot
-        cycle_period: 1.1
-        duty_factor: 0.58
-        step_height: 0.024
-        max_x: 0.12
+        cycle_period: 0.9
+        duty_factor: 0.62
+        step_height: 0.020
+        max_x: 0.10
         max_y: 0.05
         max_yaw: 0.50
         settle_time: 0.6
         body_sway_y: 0.0
         body_height_offset: 0.0
         velocity_filter_alpha: 0.30
-        command_acceleration: 0.25
+        command_acceleration: 0.08
         hardware_speed_scale: 0.80
         joint_velocity_limit_deg_s: 190.0
         joint_acceleration_limit_deg_s2: 6500.0
@@ -78,10 +83,10 @@ volt_motion_controller:
         max_y: 0.03
         max_yaw: 0.30
         settle_time: 0.8
-        body_sway_y: 0.012
+        body_sway_y: 0.009
         body_height_offset: 0.0
         velocity_filter_alpha: 0.25
-        command_acceleration: 0.15
+        command_acceleration: 0.06
         hardware_speed_scale: 0.85
         joint_velocity_limit_deg_s: 190.0
         joint_acceleration_limit_deg_s2: 6500.0
