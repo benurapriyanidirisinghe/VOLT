@@ -28,6 +28,27 @@ JOINT_NAMES = [
 # below the body therefore use negative z values.
 LEG_ORDER = ("front_left", "front_right", "rear_left", "rear_right")
 
+# JOINT_NAMES and LEG_ORDER are two independently written literals, but the
+# whole stack silently assumes they describe the same sequence: IK builds the
+# 12-value command by iterating LEG_ORDER and appending (shoulder, leg, foot),
+# and the serial calibration re-labels that array with zip(JOINT_NAMES, ...).
+# Editing one without the other would permute legs across the entire robot --
+# turning a trot into a pace or a bound -- while every downstream check still
+# passed, because a permutation is well-formed: the array is still 12 finite
+# values. Nothing else in the stack can detect that, so bind them here.
+_DERIVED_JOINT_NAMES = tuple(
+    "%s_%s" % (leg, joint)
+    for leg in LEG_ORDER
+    for joint in ("shoulder", "leg", "foot")
+)
+if _DERIVED_JOINT_NAMES != tuple(JOINT_NAMES):
+    raise ImportError(
+        "LEG_ORDER and JOINT_NAMES disagree: iterating LEG_ORDER x "
+        "(shoulder, leg, foot) yields %s but JOINT_NAMES is %s. One was "
+        "edited without the other; this would permute legs robot-wide."
+        % (list(_DERIVED_JOINT_NAMES), list(JOINT_NAMES))
+    )
+
 # Left/right mirroring is handled with LEG_SIDE and HIP_ORIGINS. The leg and
 # foot joints use the same sagittal sign convention on front and rear legs;
 # only the shoulder/hip roll direction mirrors across the body centerline.

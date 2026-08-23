@@ -171,7 +171,7 @@ substitute for identifying each channel on a raised robot.
 
 ## `FRAME` protocol
 
-The face-enabled bridge and firmware use 57600 baud and newline-terminated
+The face-enabled bridge and firmware use 250000 baud and newline-terminated
 ASCII. Reflash the firmware and rebuild/restart the ROS stack together whenever
 updating between revisions so both ends retain the same baud rate:
 

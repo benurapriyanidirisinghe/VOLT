@@ -1,7 +1,7 @@
 /*
   VOLT Arduino Nano PCA9685 physical-output firmware.
 
-  Runtime protocol, 57600 baud, newline terminated:
+  Runtime protocol, 250000 baud, newline terminated:
     FRAME d0 d1 d2 d3 d4 d5 d6 d7 d8 d9 d10 d11
       Absolute physical servo angles in degrees, ordered by PCA9685 channel.
 

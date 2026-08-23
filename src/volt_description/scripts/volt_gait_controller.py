@@ -69,13 +69,24 @@ TROT_PHASE_OFFSETS = {
     "rear_left": 0.5,
 }
 
-# Lateral-sequence amble: each hind foot is followed by the same-side front
-# foot.  Swing order over the cycle is FR, RR, FL, RL.
+# Lateral-sequence amble: each hind foot is followed by the fore foot on the
+# SAME side.  Listed below in swing order, because the leg with the largest
+# offset reaches the duty boundary first:  RR -> FR -> RL -> FL.
+#
+# The previous table had the offsets reversed within each side pair, so the
+# fore foot led the hind and the robot walked a diagonal-sequence gait
+# (hind followed by the OPPOSITE fore) despite the comment claiming lateral.
+# validate_phase_structure() now fails at import if that recurs.
+#
+# The half-cycle grouping matters for the body sway in _body_motion(): both
+# right feet swing during the first half cycle and both left feet during the
+# second, which is what lets a plain sine of the cycle phase lean the body
+# away from whichever side is currently swinging.
 AMBLE_PHASE_OFFSETS = {
-    "rear_left": 0.0,
-    "front_left": 0.25,
-    "rear_right": 0.5,
-    "front_right": 0.75,
+    "rear_right": 0.75,
+    "front_right": 0.5,
+    "rear_left": 0.25,
+    "front_left": 0.0,
 }
 
 # Every historical gait name maps onto one of the two surviving gaits so
@@ -119,6 +130,92 @@ GAIT_PARAMETER_NAMES = (
     "stance_velocity_budget_deg_s",
     "swing_velocity_budget_deg_s",
 )
+
+def _phase_separation(first, second):
+    """Circular distance between two phase offsets, in cycles (0 .. 0.5)."""
+    diff = abs(float(first) - float(second)) % 1.0
+    return min(diff, 1.0 - diff)
+
+
+def _swing_order(offsets):
+    """Legs in the order their swings begin.
+
+    A leg's local phase is (global phase + its offset) and swing starts once
+    that crosses the duty boundary, so the leg with the LARGEST offset
+    reaches the boundary first.
+    """
+    return sorted(offsets, key=lambda leg: -offsets[leg])
+
+
+def validate_phase_structure(name, offsets):
+    """Assert a gait's phase table really encodes the coordination it claims.
+
+    A permuted phase table is not malformed -- it is four valid numbers in
+    the wrong places -- so nothing downstream can catch it, and the failure
+    mode is silent: the robot walks, just in the wrong gait. (Measured on
+    hardware: a trot whose legs are exchanged at one end becomes a pace, and
+    every length and finiteness check on the command path still passes.)
+    These checks make that specific class of regression fail at import.
+    """
+    if set(offsets) != set(LEG_ORDER):
+        raise ValueError(
+            "%s phase table must cover exactly %s" % (name, list(LEG_ORDER))
+        )
+
+    if name == "trot":
+        # Two-beat: diagonal partners strike together, and the two diagonal
+        # pairs are half a cycle apart (which also makes each ipsilateral
+        # pair half a cycle apart -- the property that distinguishes a trot
+        # from a pace).
+        for a, b in (("front_left", "rear_right"), ("front_right", "rear_left")):
+            gap = _phase_separation(offsets[a], offsets[b])
+            if gap > 0.02:
+                raise ValueError(
+                    "%s: diagonal pair %s/%s is %.3f cycles apart, expected 0 "
+                    "(a trot strikes diagonal feet together)"
+                    % (name, a, b, gap)
+                )
+        for a, b in (("front_left", "rear_left"), ("front_right", "rear_right")):
+            gap = _phase_separation(offsets[a], offsets[b])
+            if abs(gap - 0.5) > 0.02:
+                raise ValueError(
+                    "%s: ipsilateral pair %s/%s is %.3f cycles apart, expected "
+                    "0.5 -- same-side legs moving together is a PACE, not a trot"
+                    % (name, a, b, gap)
+                )
+        return True
+
+    if name == "amble":
+        # Four-beat: one foot at a time, evenly spaced, and in lateral
+        # sequence -- each hind foot followed by the fore foot on the SAME
+        # side. The alternative (hind followed by the opposite fore) is a
+        # diagonal-sequence walk, which is a different gait with different
+        # support polygons, so it must not be reachable by accident.
+        order = _swing_order(offsets)
+        spacing = sorted(offsets.values())
+        for index in range(1, len(spacing)):
+            step = spacing[index] - spacing[index - 1]
+            if abs(step - 0.25) > 0.02:
+                raise ValueError(
+                    "%s: offsets %s are not evenly spaced a quarter cycle "
+                    "apart, so the four beats are not equally timed"
+                    % (name, spacing)
+                )
+        for index, leg in enumerate(order):
+            following = order[(index + 1) % len(order)]
+            if leg.startswith("rear_"):
+                expected = "front_" + leg.split("_", 1)[1]
+                if following != expected:
+                    raise ValueError(
+                        "%s: swing order %s is not a lateral sequence -- %s is "
+                        "followed by %s, but a lateral-sequence walk follows a "
+                        "hind foot with the fore foot on the same side (%s)"
+                        % (name, order, leg, following, expected)
+                    )
+        return True
+
+    raise ValueError("no phase-structure contract defined for gait %r" % name)
+
 
 _MOTION_LINEAR_DEADBAND = 0.002   # m/s
 _MOTION_YAW_DEADBAND = 0.010      # rad/s
@@ -546,6 +643,13 @@ def _builtin_gaits():
             "swing_velocity_budget_deg_s": 190.0,
         }),
     }
+
+
+# Enforce each gait's coordination contract at import: a permuted phase table
+# is four valid numbers in the wrong places, so nothing downstream can catch
+# it and the robot simply walks the wrong gait.
+for _gait_name, _gait_offsets in GAIT_PHASE_OFFSETS.items():
+    validate_phase_structure(_gait_name, _gait_offsets)
 
 
 try:
