@@ -45,19 +45,33 @@ volt_motion_controller:
     # limit on the physical robot.
     # ----------------------------------------------------------------------
     gaits:
-      # Two-beat diagonal trot, tuned in the loaded-servo Ignition model:
-      # the 0.9 s cycle leaves less time to fall onto each diagonal and
-      # duty 0.62 doubles the four-foot load-transfer windows. The slow
-      # command ramp matters: the dynamic trot is bistable on marginal
-      # servo torque, and ramping to full stride over ~2 cycles reliably
-      # enters the clean limit cycle (1.2 m / 15 s at 0.10 m/s, roll p95
-      # under 2.6 deg across repeated runs).
+      # Two-beat diagonal trot. A trot carries the whole 52 N on two diagonal
+      # feet, which at the old 0.200 m stance put the front knee at 1.855 N.m
+      # -- 105% of the ~1.76 N.m a TD-8130MG actually delivers on a shared
+      # BEC. That is why the robot shook in place instead of lifting a foot.
+      #
+      # The fix is to stand TALLER, not to command more lift. At 0.210 m the
+      # leg is 88% extended, the knee moment arm shrinks, and the same load
+      # needs only 1.317 N.m (75% of usable stall). Standing taller costs
+      # joint RATE, because a near-straight leg needs more joint motion per
+      # unit of foot travel -- so the cycle is stretched to 2.10 s to keep the
+      # peak inside the 190 deg/s clamp (firmware ceiling 240).
+      #
+      # Net: knee sweep 19.9 -> 42.6 deg and stride 44.6 -> 104.2 mm, at 75%
+      # of usable stall instead of 105%. Body height lives in the hardware
+      # profile (real_robot_profiles.yaml, REAL_DIAGNOSTIC body_height).
       trot:
         type: trot
-        cycle_period: 0.9
+        cycle_period: 2.10
         duty_factor: 0.62
         step_height: 0.020
-        max_x: 0.10
+        # max_x is set by the STANCE joints, not the swing ones. Stance joints
+        # carry the load, so their speed ceiling comes from the servo's
+        # speed-torque curve: at 0.210 m the knee runs at 75% of usable stall,
+        # leaving 375 x (1 - 0.75) = 94 deg/s. Stance needs 90 deg/s at
+        # max_x 0.085, so 0.080 keeps a real margin. Raising this past ~0.085
+        # commands the loaded joints faster than they can physically turn.
+        max_x: 0.080
         max_y: 0.05
         max_yaw: 0.50
         settle_time: 0.6

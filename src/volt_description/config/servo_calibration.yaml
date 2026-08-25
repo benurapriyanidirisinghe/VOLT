@@ -62,7 +62,7 @@ servos:
     pca_channel: 5
     direction: 1
     neutral_deg: 180.0
-    trim_deg: -7.15
+    trim_deg: 0.0
     min_deg: 30.0
     max_deg: 180.0
     min_pulse_us: 600
@@ -89,7 +89,7 @@ servos:
     pca_channel: 8
     direction: 1
     neutral_deg: 180.0
-    trim_deg: 9.18
+    trim_deg: 0.0
     min_deg: 30.0
     max_deg: 180.0
     min_pulse_us: 600

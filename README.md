@@ -123,6 +123,43 @@ automatic ready pose, no automatic Arduino arm, and no live physical output.
 The later example explicitly labeled as live hardware deliberately overrides
 those defaults and must be used only after the dry-run checklist.
 
+### Desktop launchers
+
+Three clickable entries wrap the runner for day-to-day use. They live in
+`~/.local/share/applications` with copies on the desktop, and all three call
+`src/volt_description/scripts/volt_desktop_launcher.sh`:
+
+| Icon | Mode | What it starts |
+| --- | --- | --- |
+| VOLT Simulation | `sim` | Ignition, control GUI, dry-run bridge. Servos are never written to. |
+| VOLT Control GUI | `gui` | The control GUI alone, attached to a stack that is already running. |
+| VOLT Physical Robot | `physical` | Ignition, control GUI, and the live Arduino bridge. |
+
+Each opens a terminal window so the stack log stays visible and Ctrl-C stops
+it. The launcher pins `ROS_DOMAIN_ID=17`, because the ros_nav operator station
+owns domain 0 and the two stacks cannot share it. It also forces a UDP-only
+Fast-DDS profile (written to `~/.config/volt/fastdds_no_shm.xml` on first run):
+shared-memory DDS rots on this machine after a hard kill, and `/dev/shm` is
+shared with ros_nav, so staying off SHM avoids both problems without touching
+the other project's transport.
+
+Before starting, the launcher clears leftover processes from a previous run.
+Candidates must both match a VOLT process name and have a working directory
+inside this workspace, so the ros_nav station's own `robot_state_publisher`
+and clock bridge are never touched.
+
+The physical launcher additionally refuses to start when no `/dev/ttyUSB*` or
+`/dev/ttyACM*` device is present, and otherwise shows the hardware checklist
+with two ways forward: **Launch dry-run**, which starts the identical stack
+with servo writes logged instead of sent, and **Launch LIVE**, which opens the
+serial port. Neither arms the robot — ARM stays behind the guided GUI button.
+
+Reinstall the entries after moving the workspace:
+
+```bash
+update-desktop-database ~/.local/share/applications
+```
+
 ### One-command safe runner
 
 Start the Ignition server, VOLT control GUI, dry-run serial bridge, and

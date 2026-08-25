@@ -509,13 +509,18 @@ class MotionEmoteControllerTests(unittest.TestCase):
             self.assertTrue(node.hardware_mode)
             self.assertEqual(node.active_real_profile, "REAL_DIAGNOSTIC")
             self.assertEqual(node.gait_name, "amble")
+            # Raised from 100 / 2400: those clamps sat below what the gaits
+            # actually command (trot peaks at 176 deg/s, amble at 139), so the
+            # controller silently discarded 41.6 deg of commanded motion per
+            # cycle. 190 / 6000 matches the SIMULATION profile and stays under
+            # the firmware's 240 deg/s slew ceiling.
             self.assertAlmostEqual(
                 node.max_joint_velocity,
-                math.radians(100.0),
+                math.radians(190.0),
             )
             self.assertAlmostEqual(
                 node.max_joint_acceleration,
-                math.radians(2400.0),
+                math.radians(6000.0),
             )
             self.assertAlmostEqual(node.joint_smoothing_alpha, 0.85)
         finally:

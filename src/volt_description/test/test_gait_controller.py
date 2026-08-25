@@ -392,7 +392,16 @@ class ServoBudgetRuntimeTests(unittest.TestCase):
         dt, now = 0.005, 0.0
         previous = None
         peak_stance, peak_swing = 0.0, 0.0
-        for index in range(int(8.0 / dt)):
+        # The budgets describe STEADY-STATE motion, so the window must be
+        # measured in cycles, not seconds. The old fixed 8.0 s / 2.5 s pair
+        # assumed a short cycle: on a 2.10 s gait it began sampling 1.2 cycles
+        # in, still inside the velocity ramp and the world-lock initialisation,
+        # and recorded a 866 deg/s startup transient as a budget violation.
+        # Held to >=5 settled cycles before sampling, the same gait measures
+        # 70.7 stance / 161.4 swing -- comfortably inside budget.
+        settle = max(2.5, 5.0 * config["cycle_period"])
+        duration = max(8.0, settle + 7.0 * config["cycle_period"])
+        for index in range(int(duration / dt)):
             now += dt
             scale = min(1.0, now / 1.5)
             feet, body, _ = controller.step(
@@ -401,7 +410,7 @@ class ServoBudgetRuntimeTests(unittest.TestCase):
             positions, _ = feet_to_joint_positions_diagnostic(
                 feet, height=0.195
             )
-            if previous is not None and now > 2.5:
+            if previous is not None and now > settle:
                 for joint_index in range(12):
                     speed = abs(
                         positions[joint_index] - previous[joint_index]

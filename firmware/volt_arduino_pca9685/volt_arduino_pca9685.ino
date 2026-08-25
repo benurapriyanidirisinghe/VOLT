@@ -165,8 +165,8 @@ const float CHANNEL_MAX_DEG[CHANNEL_COUNT] = {
 // slew origin instead of jumping directly to an arbitrary first target.
 const float CHANNEL_SAFE_START_DEG[CHANNEL_COUNT] = {
   122.863, 88.592, 62.169,
-  117.137, 91.408, 110.901,
-  107.013, 99.876, 127.231,
+  117.137, 91.408, 118.051,
+  107.013, 99.876, 118.051,
   90.237, 80.124, 61.939
 };
 

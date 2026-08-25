@@ -282,10 +282,19 @@ class ServoCalibrationTests(unittest.TestCase):
         repo_table = ServoCalibrationTable.from_file(
             ROOT / "config" / "servo_calibration.yaml"
         )
+        # front_right_foot and rear_left_foot previously carried -7.15 and
+        # +9.18 deg of trim, and this list encoded the stand those trims
+        # produced (-1.206 and -0.921 here). Those two trims were levelling a
+        # robot whose servo channels the OLD firmware was driving wrongly;
+        # with the firmware corrected they biased the correct legs instead,
+        # leaving the FR+RL trot diagonal 16.0 mm out of level against a 20 mm
+        # step height. Both are now 0.0, so those two joints reference the
+        # canonical WALK_POSE. The other ten still carry ~0.02 deg of real
+        # mounting trim and keep their measured entries.
         previously_leveled_pose = [
             0.050, 0.499, -1.085,
-            -0.050, 0.499, -1.206,
-            0.050, 0.696, -0.921,
+            -0.050, 0.499, -1.0812,
+            0.050, 0.696, -1.0812,
             -0.050, 0.696, -1.081,
         ]
         for joint_name, canonical_rad, previous_rad in zip(

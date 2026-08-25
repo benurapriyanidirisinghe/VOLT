@@ -69,8 +69,15 @@ def stop_process(name, process, timeout=8.0):
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 
 
-def active_ros_nodes(timeout=4.0):
-    """Return live ROS graph node names without trusting cached daemon state."""
+def active_ros_nodes(timeout=12.0):
+    """Return live ROS graph node names without trusting cached daemon state.
+
+    The timeout must clear the cost of the call itself, not just the 1 s spin:
+    a --no-daemon query builds and tears down its own participant, which on
+    this machine measures 4.2-4.4 s with an empty graph. The previous 4.0 s
+    budget sat just under that, so the preflight failed intermittently and
+    then consistently, reporting a discovery fault where none existed.
+    """
     try:
         result = subprocess.run(
             [
@@ -370,7 +377,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--baud-rate",
         default="250000",
-        help="Arduino firmware baud rate. Default: 57600.",
+        help="Arduino firmware baud rate. Default: 250000.",
     )
     parser.add_argument(
         "--gazebo-gui",

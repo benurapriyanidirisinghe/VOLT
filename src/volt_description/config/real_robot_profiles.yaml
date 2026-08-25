@@ -34,14 +34,23 @@ profiles:
     lateral_stride_width: 0.010
     step_height: 0.022
     duty_factor: 0.80
-    body_height: 0.200
+    # 0.210 instead of 0.200: a straighter leg has a shorter knee moment arm,
+    # which drops the front-knee load from 1.855 N.m (105% of usable stall) to
+    # 1.317 N.m (75%). This is the single change that lets a foot leave the
+    # ground. 0.220 is the IK's workspace ceiling here, so 0.210 keeps margin.
+    body_height: 0.210
     body_x: 0.0
     body_y: 0.0
     body_roll_deg: 0.0
     body_pitch_deg: 0.0
     body_yaw_deg: 0.0
-    max_joint_velocity_deg_s: 100.0
-    max_joint_acceleration_deg_s2: 2400.0
+    # Raised from 100 / 2400, which silently truncated the commanded gait:
+    # the amble peaks at 139 deg/s and the trot at 176 deg/s, so the old
+    # clamps discarded motion on 4.7% and 10.7% of joint-samples per cycle.
+    # 190 / 6000 matches the SIMULATION profile and stays under the firmware
+    # slew ceiling of 240 deg/s, so nothing is asked to exceed its tuning.
+    max_joint_velocity_deg_s: 190.0
+    max_joint_acceleration_deg_s2: 6000.0
     smoothing_amount: 0.15
     touchdown_softness: 0.30
     stance_width: 0.104
