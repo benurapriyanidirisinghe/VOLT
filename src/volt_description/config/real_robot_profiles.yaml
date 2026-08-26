@@ -34,11 +34,21 @@ profiles:
     lateral_stride_width: 0.010
     step_height: 0.022
     duty_factor: 0.80
-    # 0.210 instead of 0.200: a straighter leg has a shorter knee moment arm,
-    # which drops the front-knee load from 1.855 N.m (105% of usable stall) to
-    # 1.317 N.m (75%). This is the single change that lets a foot leave the
-    # ground. 0.220 is the IK's workspace ceiling here, so 0.210 keeps margin.
-    body_height: 0.210
+    # DO NOT raise this without checking the resulting SERVO angles against the
+    # leg's mechanical range, not just the software limits.
+    #
+    # 0.210 was tried here because a straighter leg has a shorter knee moment
+    # arm, dropping the front-knee load from 1.855 N.m (105% of usable stall)
+    # to 1.317 N.m (75%). The IK accepted it and every software limit passed --
+    # but it drove the knee servos about 30 deg past any angle the robot had
+    # ever run at: ch5 went from 92.8..112.8 to 116.2..143.2 against a stand
+    # pose of 118.05. The front-right foot hit its mechanical stop and jammed.
+    #
+    # servo_calibration.yaml's [30,180] for ch5/ch8 is the servo's nominal
+    # travel, NOT the linkage's usable range, so it did not catch this. At
+    # 0.200 the knees command 99.9..120.0, which is the band the robot has
+    # demonstrably operated in.
+    body_height: 0.200
     body_x: 0.0
     body_y: 0.0
     body_roll_deg: 0.0

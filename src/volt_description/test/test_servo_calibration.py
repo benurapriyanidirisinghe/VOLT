@@ -213,13 +213,17 @@ class ServoCalibrationTests(unittest.TestCase):
         repo_table = ServoCalibrationTable.from_file(
             ROOT / "config" / "servo_calibration.yaml"
         )
+        # The two front foot directions swap with their channels: direction
+        # describes the SERVO and its linkage, not the joint, so it travels
+        # with the channel when a cross-wiring is corrected. See the note in
+        # test_repo_pca_mapping_matches_measured_robot.
         expected_directions = {
             "front_left_shoulder": -1,
             "front_left_leg": 1,
-            "front_left_foot": -1,
+            "front_left_foot": 1,
             "front_right_shoulder": -1,
             "front_right_leg": -1,
-            "front_right_foot": 1,
+            "front_right_foot": -1,
             "rear_left_shoulder": -1,
             "rear_left_leg": 1,
             "rear_left_foot": 1,
@@ -253,13 +257,21 @@ class ServoCalibrationTests(unittest.TestCase):
         repo_table = ServoCalibrationTable.from_file(
             ROOT / "config" / "servo_calibration.yaml"
         )
+        # front_left_foot 5 / front_right_foot 2, not 2 / 5. Those two were
+        # cross-wired on the robot and the error was baked in here. A live
+        # per-channel test (volt_pca_channel_gui.py, raw SERVO commands, which
+        # bypass this table entirely) showed ch2 physically drives the FRONT-
+        # RIGHT foot and ch5 the FRONT-LEFT. That measurement supersedes the
+        # bench assumption these values came from: it is what made the robot
+        # pace instead of trot, because it put both phase groups on SIDE pairs
+        # rather than diagonals.
         expected_channels = {
             "front_left_shoulder": 3,
             "front_left_leg": 1,
-            "front_left_foot": 2,
+            "front_left_foot": 5,
             "front_right_shoulder": 0,
             "front_right_leg": 4,
-            "front_right_foot": 5,
+            "front_right_foot": 2,
             "rear_left_shoulder": 9,
             "rear_left_leg": 7,
             "rear_left_foot": 8,
@@ -291,9 +303,17 @@ class ServoCalibrationTests(unittest.TestCase):
         # step height. Both are now 0.0, so those two joints reference the
         # canonical WALK_POSE. The other ten still carry ~0.02 deg of real
         # mounting trim and keep their measured entries.
+        #
+        # Entries 2 and 5 (the two front feet) also swapped with their servo
+        # tuples when the ch2/ch5 cross-wiring was corrected: the +0.22 deg
+        # mounting trim belongs to the ch2 servo, which drives the FRONT-RIGHT
+        # foot, so it now sits on front_right_foot. Per CHANNEL the stand
+        # output is unchanged -- ch2 still 62.169, ch5 still 118.051 -- which
+        # is why the robot stands identically either way and why this fault
+        # was invisible to every symmetric motion, push-ups included.
         previously_leveled_pose = [
-            0.050, 0.499, -1.085,
-            -0.050, 0.499, -1.0812,
+            0.050, 0.499, -1.0812,
+            -0.050, 0.499, -1.085,
             0.050, 0.696, -1.0812,
             -0.050, 0.696, -1.081,
         ]

@@ -146,15 +146,33 @@ const uint16_t CHANNEL_MAX_US[CHANNEL_COUNT] = {
   2400, 2400, 2400
 };
 
+// ch2 (physically the FRONT-RIGHT foot) is 50.0, not 0.0. This is the servo
+// that jammed: while ch2/ch5 were cross-wired, body_height 0.210 sent it
+// 39.8 deg against a normal walking band of 54..79 -- 14 deg BELOW its usable
+// travel, so it drove the linkage into its stop. Its exposed side is the MIN,
+// because this channel runs dir -1 from a neutral of 0. 50.0 clears the worst
+// emote (happy_dance, 54.1) and walking at 0.200 (53.7).
+// It cannot live in servo_calibration.yaml: from_dict() enforces
+// min_deg <= neutral_deg and this channel's neutral is 0.
 const float CHANNEL_MIN_DEG[CHANNEL_COUNT] = {
-  70.0, 0.0, 0.0,
+  70.0, 0.0, 50.0,
   70.0, 0.0, 30.0,
   50.0, 0.0, 30.0,
   50.0, 0.0, 0.0
 };
+// ch5 (physically the FRONT-LEFT foot) is 130.0, not the nominal 180.0.
+// Its exposed side is the MAX, because this channel runs dir +1 from a
+// neutral of 180 -- the mirror of ch2 above. At body_height 0.210 it was
+// commanded 140.4 against a normal band of 101..126. It did not visibly jam,
+// but it was as far out of band as ch2 was, so it gets the matching guard.
+// 130.0 clears the worst emote (happy_dance, 125.9) and walking at 0.200
+// (126.3), while blocking the 137.6 that body_height 0.205 would command.
+// Like ch2's, this cannot live in servo_calibration.yaml: from_dict()
+// enforces neutral_deg <= max_deg and this channel's neutral is 180.
+// Replace both with the measured mechanical stops once they are known.
 const float CHANNEL_MAX_DEG[CHANNEL_COUNT] = {
   160.0, 180.0, 150.0,
-  160.0, 180.0, 180.0,
+  160.0, 180.0, 130.0,
   140.0, 180.0, 180.0,
   140.0, 180.0, 150.0
 };

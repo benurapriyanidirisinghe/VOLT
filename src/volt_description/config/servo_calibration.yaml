@@ -31,13 +31,21 @@ servos:
     max_deg: 180.0
     min_pulse_us: 600
     max_pulse_us: 2400
+  # ch2 and ch5 were cross-wired: a per-channel test with raw SERVO commands
+  # showed ch2 physically drives the FRONT-RIGHT foot and ch5 the FRONT-LEFT.
+  # The whole servo tuple is swapped below, not just pca_channel, because
+  # direction/neutral/trim/limits describe the SERVO and its linkage, not the
+  # joint. Swapping only the channel would leave each joint paired with the
+  # other servo's mirror convention and jump both channels 55.9 deg on the
+  # first frame. Swapped wholesale, every channel receives exactly the value
+  # it does today at the stand pose, so the standing geometry is unchanged.
   front_left_foot:
-    pca_channel: 2
-    direction: -1
-    neutral_deg: 0.0
-    trim_deg: 0.22
-    min_deg: 0.0
-    max_deg: 150.0
+    pca_channel: 5
+    direction: 1
+    neutral_deg: 180.0
+    trim_deg: 0.0
+    min_deg: 30.0
+    max_deg: 180.0
     min_pulse_us: 600
     max_pulse_us: 2400
   front_right_shoulder:
@@ -58,13 +66,19 @@ servos:
     max_deg: 180.0
     min_pulse_us: 600
     max_pulse_us: 2400
+  # Paired with ch2 -- see the note on front_left_foot. This is the servo that
+  # jammed: at body_height 0.210 the cross-wiring sent it 39.8 deg against a
+  # normal walking band of 54..79, i.e. 14 deg BELOW its usable travel. The
+  # protective limit for it therefore belongs on the MIN side, and lives in
+  # the firmware's CHANNEL_MIN_DEG[2]; min_deg cannot be raised here because
+  # from_dict() enforces min_deg <= neutral_deg and this neutral is 0.
   front_right_foot:
-    pca_channel: 5
-    direction: 1
-    neutral_deg: 180.0
-    trim_deg: 0.0
-    min_deg: 30.0
-    max_deg: 180.0
+    pca_channel: 2
+    direction: -1
+    neutral_deg: 0.0
+    trim_deg: 0.22
+    min_deg: 0.0
+    max_deg: 150.0
     min_pulse_us: 600
     max_pulse_us: 2400
   rear_left_shoulder:
