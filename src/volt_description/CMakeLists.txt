@@ -49,6 +49,7 @@ install(
     scripts/volt_joint_test_gui.py
     scripts/volt_kinematics.py
     scripts/volt_joint_mapping_test.py
+    scripts/volt_body_balance_test.py
     scripts/volt_motion_controller.py
     scripts/volt_pca_channel_gui.py
     scripts/volt_physical_tests.py
