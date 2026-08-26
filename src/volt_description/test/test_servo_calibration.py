@@ -257,14 +257,25 @@ class ServoCalibrationTests(unittest.TestCase):
         repo_table = ServoCalibrationTable.from_file(
             ROOT / "config" / "servo_calibration.yaml"
         )
-        # front_left_foot 5 / front_right_foot 2, not 2 / 5. Those two were
-        # cross-wired on the robot and the error was baked in here. A live
-        # per-channel test (volt_pca_channel_gui.py, raw SERVO commands, which
-        # bypass this table entirely) showed ch2 physically drives the FRONT-
-        # RIGHT foot and ch5 the FRONT-LEFT. That measurement supersedes the
-        # bench assumption these values came from: it is what made the robot
-        # pace instead of trot, because it put both phase groups on SIDE pairs
-        # rather than diagonals.
+        # ALL TWELVE of these are measured, not assumed. Every channel was
+        # wiggled individually on the robot with volt_pca_channel_gui.py, whose
+        # raw SERVO commands bypass this table entirely, so what moves is
+        # decided by the wiring; the leg that moved was recorded by eye. The
+        # full sweep came back match on all twelve.
+        #
+        # It did not always. front_left_foot is 5 and front_right_foot is 2,
+        # not 2 and 5: those two were cross-wired on the robot and the error
+        # was baked in here as a bench assumption. That single fault is what
+        # made the robot pace instead of trot, because crossing the front feet
+        # put both trot phase groups on SIDE pairs instead of diagonals. It
+        # survived a long investigation because it is invisible to any
+        # symmetric motion -- push-ups commands both front feet identically,
+        # so swapping two identical commands changes nothing observable.
+        #
+        # If these values are ever edited again, re-run that sweep. Do not
+        # infer a channel by elimination: ch11 was the last one still resting
+        # on elimination, and elimination is precisely the reasoning that hid
+        # the ch2/ch5 swap.
         expected_channels = {
             "front_left_shoulder": 3,
             "front_left_leg": 1,
