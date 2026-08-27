@@ -643,15 +643,15 @@ def _builtin_gaits():
             "stance_velocity_budget_deg_s": 80.0,
             "swing_velocity_budget_deg_s": 190.0,
         }),
-        # RUN: the fastest configuration validate_servo_budget accepts.
-        # Above 1.30 Hz the shorter swing pushes the unloaded leg past its
-        # 190 deg/s budget, so this is a hardware wall, not a preference.
+        # RUN: 0.80 Hz, the peak of the stride/cadence frontier. Faster
+        # cadence shrinks the stride (the foot must cover it inside a shorter
+        # stance), so 1.30 Hz would give 52 mm steps against the trot's 83.
         "run": _validate_gait_config("run", {
             "type": "run",
-            "cycle_period": 0.77,
+            "cycle_period": 1.25,
             "duty_factor": 0.50,
             "step_height": 0.026,
-            "max_x": 0.096,
+            "max_x": 0.172,
             "max_y": 0.05,
             "max_yaw": 0.50,
             "settle_time": 0.6,

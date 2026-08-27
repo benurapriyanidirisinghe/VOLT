@@ -1723,6 +1723,11 @@ class VoltControlWindow(QMainWindow):
 
         telemetry_group = QGroupBox("Commanded Telemetry — No Servo Feedback")
         telemetry_layout = QVBoxLayout(telemetry_group)
+        self.resolved_gait_label = QLabel("Gait parameters appear on selection.")
+        self.resolved_gait_label.setWordWrap(True)
+        self.resolved_gait_label.setObjectName("gaitDetail")
+        self.resolved_gait_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        telemetry_layout.addWidget(self.resolved_gait_label)
         self.commanded_telemetry = QLabel("Waiting for /volt/status.")
         self.commanded_telemetry.setWordWrap(True)
         self.commanded_telemetry.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -4200,6 +4205,10 @@ class VoltControlWindow(QMainWindow):
                 "connected" if serial_connected else "offline/dry-run",
             )
         )
+        resolved = status.get("resolved_gait")
+        if resolved:
+            self.resolved_gait_label.setText(str(resolved))
+            self.resolved_gait_label.setStyleSheet("color:#7dd3fc;")
         self.commanded_telemetry.setText(
             "\n".join([body_text] + leg_lines + [footer])
         )

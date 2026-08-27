@@ -2403,6 +2403,38 @@ class VoltMotionController(Node):
         self.gait_controller.set_gait(gait_name, now)
         self.require_neutral_velocity()
         self.get_logger().info("Selected %s gait." % gait_name)
+        self.get_logger().info(self.resolved_gait_summary(gait_name))
+
+    def resolved_gait_summary(self, gait_name):
+        """One line naming what the generator will ACTUALLY use.
+
+        Stride is the number that matters and the one nobody can read off the
+        config: it is max_x * hardware_speed_scale * duty * cycle_period, so a
+        faster cadence SHRINKS it unless max_x rises to compensate. A gait can
+        therefore be configured to step rapidly and travel almost nowhere,
+        which on hardware looks exactly like shaking in place. Printing the
+        resolved set makes that visible at the moment of selection instead of
+        after a video session.
+        """
+        config = self.gait_configs.get(gait_name, {})
+        if not config:
+            return "resolved %s: <no config>" % gait_name
+        scale = self.active_speed_scale(config)
+        vx = config["max_x"] * scale
+        period = config["cycle_period"]
+        duty = config["duty_factor"]
+        stride = vx * duty * period
+        return (
+            "resolved %s: cadence %.2f Hz  duty %.2f  vx %.4f m/s "
+            "(max_x %.3f x scale %.2f)  stride %.1f mm  speed %.3f m/s  "
+            "step_height %.3f m  body_height %.3f m"
+            % (
+                gait_name, 1.0 / period, duty, vx,
+                config["max_x"], scale, stride * 1000.0,
+                stride / period, config["step_height"],
+                getattr(self, "body_height", float("nan")),
+            )
+        )
 
     def begin_transition(self, waypoints, final_state):
         start = (
@@ -3827,6 +3859,7 @@ class VoltMotionController(Node):
                 True,
             ),
             "lift_allowed": debug.get("lift_allowed", False),
+            "resolved_gait": self.resolved_gait_summary(self.gait_name),
             "projected_targets": list(self.projected_targets),
             "clamped_joints": clamped_joints,
             "workspace_margin": workspace_margin,

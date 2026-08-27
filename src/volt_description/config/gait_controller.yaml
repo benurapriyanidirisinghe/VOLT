@@ -107,30 +107,50 @@ volt_motion_controller:
         stance_velocity_budget_deg_s: 80.0
         swing_velocity_budget_deg_s: 190.0
 
-      # RUN: a fast trot, not a new coordination. 1.30 Hz at duty 0.50 is
-      # the FASTEST configuration validate_servo_budget will accept -- above
-      # it the shorter swing pushes the unloaded leg past its 190 deg/s
-      # budget, so this is the wall on this hardware rather than a choice.
+      # RUN: a fast trot. "Fast" means fast OVER GROUND, which is not the
+      # same as fast cadence -- and on this robot they pull in opposite
+      # directions.
       #
-      # It is deliberately NOT the plan's "body height -10 to -15%": lowering
-      # the body lengthens the knee moment arm, which takes the knee from
-      # 105% to 148% of usable stall. Crouching to run makes running harder
-      # on this robot.
+      # stride = max_x * hardware_speed_scale * duty * cycle_period, so
+      # raising cadence shrinks the stride unless max_x rises to compensate.
+      # It cannot rise freely: validate_servo_budget caps it because the foot
+      # has to cover the stride within the stance window. The frontier, at
+      # duty 0.50, largest stride the budget accepts:
       #
-      # Duty is the ladder to walk downward from here (0.50 -> 0.47 -> 0.45),
-      # one recording per step, watching that the vertical bob stays
-      # dominated by its 2x component. If the 1x overtakes it, the diagonals
-      # are desynchronising under load: back off a rung.
+      #     0.48 Hz -> 113 mm, 0.241 BL/s
+      #     0.60 Hz -> 105 mm, 0.280 BL/s
+      #     0.70 Hz ->  95 mm, 0.294 BL/s
+      #     0.80 Hz ->  86 mm, 0.304 BL/s   <- peak speed over ground
+      #     1.00 Hz ->  55 mm, 0.244 BL/s
+      #     1.30 Hz ->  42 mm, 0.241 BL/s
       #
-      # Entry gates before this gait is driven at all: zero CRC failures and
-      # zero sequence gaps over 60 s, foot clearance at least 8% of module
-      # span on all four feet, and roll 1x below 2x.
+      # The first RUN shipped at 1.30 Hz with max_x set to the trot's x1.2,
+      # which produced a 29.6 mm stride against the trot's 83.3 -- steps
+      # nearly three times SMALLER at nearly three times the cadence. Tiny
+      # steps lose entirely to stance slip, so the robot ran on the spot.
+      # That was a parameter error: "+20% stride" was applied to the velocity
+      # limit rather than to the stride.
+      #
+      # 0.80 Hz sits at the peak: 1.7x the trot's cadence, a slightly longer
+      # stride than the trot's 83.3 mm, and 1.7x its speed over ground. Note
+      # the frontier is computed against BOTH envelopes load_gait_configs
+      # enforces -- the unscaled command limit binds first, and checking only
+      # the hardware-scaled one overstates every rung.
+      #
+      # Cadence is the ladder to walk UP from here (0.80 -> 1.00 -> 1.30),
+      # one recording per rung, stopping at the last rung where travel per
+      # stride has not collapsed. Duty ladders DOWN separately (0.50 -> 0.47
+      # -> 0.45) toward a flight phase.
+      #
+      # None of this makes RUN move while the trot knee sits at 105% of
+      # usable stall: the budget checks commanded joint RATE, not whether the
+      # loaded servo has any speed left to deliver it. Clearance first.
       run:
         type: run
-        cycle_period: 0.77
+        cycle_period: 1.25
         duty_factor: 0.50
         step_height: 0.026
-        max_x: 0.096
+        max_x: 0.172
         max_y: 0.05
         max_yaw: 0.50
         settle_time: 0.6
