@@ -25,6 +25,9 @@ from volt_serial_protocol import (
     duplicate_stack_topics,
     format_face_command,
     format_frame_command,
+    format_binary_frame,
+    BINARY_PROTOCOL_MIN_VERSION,
+    FIRMWARE_COUNTER_FIELDS,
     format_led_color_b_command,
     format_led_brightness_command,
     format_led_color_command,
@@ -326,6 +329,11 @@ class VoltSerialBridge(Node):
         self.last_protocol_command_time = 0.0
         self.serial_query_inflight = ""
         self.serial_query_since = 0.0
+        # Distinct from self.frame_sequence, which is a pre-existing unbounded
+        # counter the MOTION-ownership floor compares against.  Wrapping that
+        # one at 8 bits would corrupt the interlock.
+        self.binary_frame_seq = 0
+        self.last_firmware_status_poll = 0.0
         self.connected = False
         self.protocol = ArduinoProtocolState()
         self.serial_lines = SerialLineBuffer()
@@ -1377,13 +1385,13 @@ class VoltSerialBridge(Node):
         if not 0.0 <= frame_age <= self.arm_frame_timeout:
             return False
         try:
-            line = format_frame_command(self.last_frame)
+            sent = self.send_frame_payload(self.last_frame)
         except (TypeError, ValueError) as exc:
             self.frames_rejected += 1
             self.last_error = "Cached FRAME rejected: %s" % exc
             self.get_logger().error(self.last_error)
             return False
-        if not self.send_protocol_command(line):
+        if not sent:
             return False
         self.defer_next_frame_until_period_after(self.now_seconds())
         self.frames_sent += 1
@@ -1398,6 +1406,38 @@ class VoltSerialBridge(Node):
             raise SerialException(
                 "short serial write: %d of %d bytes" % (written, len(payload))
             )
+
+    def write_bytes(self, payload):
+        if self.serial_port is None:
+            raise SerialException("serial port is not open")
+        written = self.serial_port.write(payload)
+        if written != len(payload):
+            raise SerialException(
+                "short serial write: %d of %d bytes" % (written, len(payload))
+            )
+
+    def binary_frames_supported(self):
+        return self.protocol.protocol_version >= BINARY_PROTOCOL_MIN_VERSION
+
+    def send_frame_payload(self, frame):
+        """Write one 12-channel frame, binary when the firmware supports it.
+
+        Binary frames are fire-and-forget by design: the firmware answers
+        corruption with a counter, never a reply, so there is no pending
+        command to track.  note_command_sent() ignores FRAME for the ASCII
+        path for the same reason.
+        """
+        if not self.binary_frames_supported():
+            return self.send_protocol_command(format_frame_command(frame))
+        payload = format_binary_frame(frame, self.binary_frame_seq)
+        try:
+            self.write_bytes(payload)
+        except (SerialException, OSError) as exc:
+            self.disconnect(str(exc))
+            return False
+        self.binary_frame_seq = (self.binary_frame_seq + 1) & 0xFF
+        self.last_protocol_command_time = time.monotonic()
+        return True
 
     def send_protocol_command(self, command):
         if command in LONG_RESPONSE_COMMANDS and self.serial_query_inflight:
@@ -1654,7 +1694,7 @@ class VoltSerialBridge(Node):
         # a separate callback and always bypass this cosmetic/query gate.
         if self.serial_query_inflight:
             return
-        if self.send_protocol_command(line):
+        if self.send_frame_payload(frame):
             self.frames_sent += 1
         else:
             self.frames_rejected += 1
@@ -1778,6 +1818,24 @@ class VoltSerialBridge(Node):
                     # ever assuming the missing acknowledgement succeeded.
                     self.send_protocol_command(guarded_pending)
                 self.send_arm_if_ready()
+                # Poll firmware link-health counters so the GUI DIAGNOSTICS
+                # tab can show CRC_FAIL/SEQ_GAP/loop timings.  A STATUS query
+                # sets serial_query_inflight, and BOTH the live frame path and
+                # send_cached_frame() refuse while that is set -- so polling
+                # during the ARM handshake makes the post-ARM cached frame fail
+                # and drops the bridge into Hardware HOLD.  Poll only once
+                # streaming is actually established, never while arming.
+                if (
+                    self.protocol.ready
+                    and self.protocol.armed
+                    and self.protocol.can_stream_frames
+                    and not self.arm_requested
+                    and not self.protocol.pending_command
+                    and not self.serial_query_inflight
+                    and now - self.last_firmware_status_poll >= 10.0
+                ):
+                    if self.send_protocol_command("STATUS"):
+                        self.last_firmware_status_poll = now
                 if (
                     self.face_inflight_key
                     and now - self.face_inflight_since >= self.command_timeout
@@ -1974,6 +2032,17 @@ class VoltSerialBridge(Node):
                 ",".join(clamped),
                 " ".join("%.2f" % value for value in self.last_frame),
             )
+        )
+        if self.protocol.firmware_counters:
+            message.data += " " + " ".join(
+                "fw_%s=%s" % (name.lower(), status_token(value))
+                for name, value in sorted(
+                    self.protocol.firmware_counters.items()
+                )
+            )
+        message.data += " binary_frames=%d frame_seq_tx=%d" % (
+            int(self.binary_frames_supported()),
+            self.binary_frame_seq,
         )
         self.status_publisher.publish(message)
 

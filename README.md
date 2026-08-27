@@ -282,7 +282,7 @@ jump when pulses are first enabled.
 ros2 launch volt_description hardware_control.launch.py \
   gui:=true \
   serial_port:=/dev/ttyUSB1 \
-  baud_rate:=57600 \
+  baud_rate:=250000 \
   hardware_enabled:=false \
   dry_run:=true \
   auto_arm:=false \
@@ -305,7 +305,7 @@ explicitly unlocked by restarting the hardware-only launch with:
 ros2 launch volt_description hardware_control.launch.py \
   gui:=true \
   serial_port:=/dev/ttyUSB1 \
-  baud_rate:=57600 \
+  baud_rate:=250000 \
   hardware_enabled:=true \
   dry_run:=false \
   auto_arm:=false \
@@ -636,7 +636,7 @@ parallel wiring.
 ### Raised face-hardware test
 
 Keep VOLT rigidly supported with its feet clear and leave servo power off or
-the firmware disarmed. Use a 57600-baud serial terminal with newline endings,
+the firmware disarmed. Use a 250000-baud serial terminal with newline endings,
 and wait for `OK VOLT_PCA9685_READY ... FACE_SUPPORTED=1` after opening it.
 
 1. Confirm reset clears both strips, cyan startup appears, and idle breathing
@@ -848,8 +848,36 @@ STATUS
 `FRAME` contains exactly 12 **physical servo angles in degrees**, already
 calibrated and ordered by PCA channel 0 through 11. It is not radians and is
 not canonical ROS joint order. Frames are newline-terminated and the bridge
-limits transmission to 30 Hz. Gait mathematics remains entirely outside the
+limits transmission to 60 Hz. Gait mathematics remains entirely outside the
 Arduino.
+
+### Binary FRAME (PROTO 3)
+
+Firmware PROTO >= 3 additionally accepts a binary frame, and the bridge sends
+it automatically once the banner reports that version (older firmware keeps
+receiving ASCII; older bridges keep working, because the ASCII form remains
+accepted forever):
+
+```text
+0xA5  seq  d0_lo d0_hi ... d11_lo d11_hi  crc8      (27 bytes)
+```
+
+Values are uint16 little-endian **centidegrees** (0..18000); `crc8` is
+CRC-8 Dallas/Maxim over seq+payload. Centidegrees end the whole-degree
+quantisation of the ASCII `%.0f` encoding, which had flattened the four
+shoulder channels (~0.31 deg of commanded amplitude) to a constant integer.
+A frame that fails CRC, or whose sequence skips, is dropped **silently** and
+counted -- `STATUS` reports `FRAMES_BIN`, `CRC_FAIL`, `SEQ_GAP`,
+`LOOP_MAX_US`, `I2C_MAX_US`, `LED_SHOWS`, and `SRAM_FREE`, which the bridge
+polls every 5 s and forwards to the GUI DIAGNOSTICS tab as `fw_*` fields.
+Printing an error per corrupt frame is itself a serial-timing hazard, which
+is why corruption is counted rather than reported per event.
+
+Note the PCA9685 resolution floor: at the default 50 Hz servo PWM one tick is
+~0.49 deg, so sub-degree commands only matter once the servo PWM frequency is
+raised (a 250 Hz build exists; bench-verify one leg against a protractor
+before walking it -- the prescaler rounds, so every pulse width rescales
+slightly).
 
 ## Safe serial dry-run
 

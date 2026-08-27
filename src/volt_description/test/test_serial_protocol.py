@@ -9,6 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from volt_serial_protocol import (
+    BINARY_FRAME_MAGIC,
+    BINARY_PROTOCOL_MIN_VERSION,
+    FIRMWARE_COUNTER_FIELDS,
+    crc8_maxim,
+    format_binary_frame,
     ArduinoProtocolState,
     CRITICAL_STACK_TOPICS,
     EXPECTED_FIRMWARE_ID,
@@ -626,6 +631,61 @@ class ArduinoProtocolStateTests(unittest.TestCase):
         self.assertEqual(guarded_pending_command("ARM", False), "HOLD")
         self.assertEqual(guarded_pending_command("ARM", True), "ARM")
         self.assertEqual(guarded_pending_command("DISARM", False), "DISARM")
+
+
+class BinaryFrameTests(unittest.TestCase):
+    """The binary FRAME encoding must match the firmware bit for bit."""
+
+    def test_crc8_maxim_reference_vector(self):
+        # The canonical Dallas/Maxim check value.  If this fails, the host and
+        # firmware disagree on the polynomial and every frame will be dropped.
+        self.assertEqual(crc8_maxim(b"123456789"), 0xA1)
+
+    def test_frame_layout_matches_firmware_contract(self):
+        frame = format_binary_frame([118.051] * 12, 7)
+        self.assertEqual(len(frame), 27)
+        self.assertEqual(frame[0], BINARY_FRAME_MAGIC)
+        self.assertEqual(frame[1], 7)
+        # 118.051 deg -> 11805 centidegrees, little-endian.
+        self.assertEqual(frame[2] | (frame[3] << 8), 11805)
+        self.assertEqual(crc8_maxim(frame[1:26]), frame[26])
+
+    def test_values_clamp_to_servo_range_and_reject_non_finite(self):
+        low = format_binary_frame([-5.0] * 12, 0)
+        high = format_binary_frame([200.0] * 12, 0)
+        self.assertEqual(low[2] | (low[3] << 8), 0)
+        self.assertEqual(high[2] | (high[3] << 8), 18000)
+        with self.assertRaises(ValueError):
+            format_binary_frame([float("nan")] * 12, 0)
+        with self.assertRaises(ValueError):
+            format_binary_frame([1.0] * 11, 0)
+        with self.assertRaises(ValueError):
+            format_binary_frame([1.0] * 12, 256)
+
+    def test_centidegrees_preserve_shoulder_amplitude(self):
+        # The ASCII %.0f encoding flattened the 0.31 deg shoulder sweep to a
+        # single integer.  The binary path must keep sub-degree structure.
+        lo = format_binary_frame([117.90] * 12, 0)
+        hi = format_binary_frame([118.21] * 12, 1)
+        self.assertNotEqual(lo[2:4], hi[2:4])
+
+    def test_firmware_constants_match_host_contract(self):
+        firmware = (
+            Path(__file__).resolve().parents[3]
+            / "firmware"
+            / "volt_arduino_pca9685"
+            / "volt_arduino_pca9685.ino"
+        ).read_text(encoding="utf-8")
+        self.assertIn("const uint16_t PROTOCOL_VERSION = %d;"
+                      % BINARY_PROTOCOL_MIN_VERSION, firmware)
+        self.assertIn("const uint8_t BIN_FRAME_MAGIC = 0xA5;", firmware)
+        self.assertIn("const uint8_t BIN_FRAME_BODY_LEN = 26;", firmware)
+        # Same reflected polynomial on both ends.
+        self.assertIn("crc ^= 0x8C;", firmware)
+        # Silent-drop contract: the binary reject path must never print.
+        self.assertNotIn("ERR CRC", firmware)
+        for counter in FIRMWARE_COUNTER_FIELDS:
+            self.assertIn(counter + "=", firmware.replace('F(" ', '').replace('")', ''))
 
 
 if __name__ == "__main__":

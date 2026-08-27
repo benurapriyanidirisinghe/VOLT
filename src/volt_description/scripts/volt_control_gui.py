@@ -1684,20 +1684,29 @@ class VoltControlWindow(QMainWindow):
             button.clicked.connect(callback)
             diagnostic_layout.addWidget(button, 1 + index // 2, (index % 2) * 2, 1, 2)
             self.diagnostic_buttons.append(button)
+        self.run_gait_button = QPushButton("G — SELECT RUN")
+        self.run_gait_button.setEnabled(False)
+        self.run_gait_button.setToolTip(
+            "RUN is a stage-3 gait: a fast trot stepped toward duty < 0.5 "
+            "behind hard entry gates (zero link errors over 60 s, clearance "
+            ">= 8% of module span on all four feet, roll 1x < 2x). The "
+            "button enables when the gait exists in the engine."
+        )
+        diagnostic_layout.addWidget(self.run_gait_button, 4, 0, 1, 4)
         self.stop_diagnostic_button = QPushButton("STOP DIAGNOSTIC")
         self.stop_diagnostic_button.setObjectName("stop")
         self.stop_diagnostic_button.clicked.connect(self.stop_physical_diagnostic)
-        diagnostic_layout.addWidget(self.stop_diagnostic_button, 4, 0, 1, 4)
+        diagnostic_layout.addWidget(self.stop_diagnostic_button, 5, 0, 1, 4)
         self.diagnostic_status = QLabel(
             "A-D are finite leased Cartesian tests. E-F select a gait; use the joystick only after the selection is confirmed."
         )
         self.diagnostic_status.setWordWrap(True)
         self.diagnostic_status.setObjectName("gaitDetail")
-        diagnostic_layout.addWidget(self.diagnostic_status, 5, 0, 1, 4)
+        diagnostic_layout.addWidget(self.diagnostic_status, 6, 0, 1, 4)
         self.gait_diagnostics = QLabel("Gait diagnostics will appear here.")
         self.gait_diagnostics.setWordWrap(True)
         self.gait_diagnostics.setObjectName("gaitDetail")
-        diagnostic_layout.addWidget(self.gait_diagnostics, 6, 0, 1, 4)
+        diagnostic_layout.addWidget(self.gait_diagnostics, 7, 0, 1, 4)
         diagnostics_layout.addWidget(
             diagnostic_group,
             0,
@@ -1718,8 +1727,26 @@ class VoltControlWindow(QMainWindow):
             1,
             alignment=Qt.AlignTop,
         )
+
+        link_group = QGroupBox("Firmware Link Health")
+        link_layout = QVBoxLayout(link_group)
+        self.firmware_link_label = QLabel(
+            "Waiting for firmware STATUS (polled every 5 s while connected)."
+        )
+        self.firmware_link_label.setWordWrap(True)
+        self.firmware_link_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        self.firmware_link_label.setObjectName("gaitDetail")
+        link_layout.addWidget(self.firmware_link_label)
+        diagnostics_layout.addWidget(
+            link_group,
+            1,
+            1,
+            alignment=Qt.AlignTop,
+        )
         emotes_face_layout.setRowStretch(1, 1)
-        diagnostics_layout.setRowStretch(1, 1)
+        diagnostics_layout.setRowStretch(2, 1)
         right.addStretch(1)
         workspace.addLayout(right, 4)
 
@@ -2077,6 +2104,43 @@ class VoltControlWindow(QMainWindow):
             return
         self.face_status.setText(text)
         self.face_status.setStyleSheet("color: %s;" % color)
+
+    def refresh_firmware_link_health(self, fields):
+        """Render the firmware's link counters on the DIAGNOSTICS tab.
+
+        Stage-1 acceptance is fw_crc_fail and fw_seq_gap holding at zero over
+        60 s of walking with the face animating, so those two lead the line
+        and turn the label red when nonzero.
+        """
+        label = getattr(self, "firmware_link_label", None)
+        if label is None or "fw_crc_fail" not in fields:
+            return
+        binary = fields.get("binary_frames", "0") == "1"
+        crc_fail = fields.get("fw_crc_fail", "?")
+        seq_gap = fields.get("fw_seq_gap", "?")
+        text = (
+            "encoding: %s\n"
+            "CRC failures: %s    sequence gaps: %s\n"
+            "frames rx: %s binary / %s ascii\n"
+            "loop max: %s us    servo I2C max: %s us\n"
+            "LED shows: %s    free SRAM: %s bytes"
+            % (
+                "BINARY (PROTO>=3)" if binary else "ASCII (legacy firmware)",
+                crc_fail,
+                seq_gap,
+                fields.get("fw_frames_bin", "?"),
+                fields.get("fw_frames_ascii", "?"),
+                fields.get("fw_loop_max_us", "?"),
+                fields.get("fw_i2c_max_us", "?"),
+                fields.get("fw_led_shows", "?"),
+                fields.get("fw_sram_free", "?"),
+            )
+        )
+        corrupt = crc_fail not in ("0", "?") or seq_gap not in ("0", "?")
+        label.setText(text)
+        label.setStyleSheet(
+            "color: #f87171;" if corrupt else "color: #86efac;"
+        )
 
     def refresh_face_status(self, fields):
         if not hasattr(self, "face_status") or self.face_catalog is None:
@@ -2441,7 +2505,19 @@ class VoltControlWindow(QMainWindow):
             return
         if gait not in self.gait_limits:
             return
+        # The speed limit is scoped per gait: a limit tuned for the slow
+        # amble must not silently carry into the trot (or later RUN), and a
+        # trot limit must not lobotomize the amble.  Save the outgoing gait's
+        # slider, restore the incoming gait's last value (default: current).
+        if not hasattr(self, "per_gait_speed_percent"):
+            self.per_gait_speed_percent = {}
+        self.per_gait_speed_percent[self.current_gait] = (
+            self.speed_slider.value()
+        )
         self.current_gait = gait
+        restored = self.per_gait_speed_percent.get(gait)
+        if restored is not None and restored != self.speed_slider.value():
+            self.speed_slider.setValue(restored)
         self.ros_node.publish_text(self.ros_node.gait_publisher, gait)
 
     def mark_real_tuning_dirty(self, *_args):
@@ -4152,6 +4228,7 @@ class VoltControlWindow(QMainWindow):
         fields = parse_key_value_status(message.data)
         self.last_serial_status_fields = dict(fields)
         self.last_serial_status_time = time.monotonic()
+        self.refresh_firmware_link_health(fields)
         self.refresh_face_status(fields)
         if self.last_face_motion_status:
             face_status = dict(self.last_face_motion_status)

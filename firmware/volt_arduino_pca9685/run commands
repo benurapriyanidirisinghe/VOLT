@@ -11,7 +11,7 @@ ros2 run volt_description volt_run_all.py \
 
 
   ///////////////////////////////
-f
+
   ls -l /dev/ttyUSB* /dev/ttyACM*
 
 

@@ -6,7 +6,7 @@ The ROS bridge owns transport and timing.  This module owns only confirmed
 firmware state, which keeps safety-critical parsing directly unit testable.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import re
 
@@ -138,6 +138,64 @@ def format_frame_command(values):
     if len((command + "\n").encode("ascii")) > 63:
         raise ValueError("FRAME exceeds the Nano's safe receive size")
     return command
+
+
+# ---- Binary FRAME path (firmware PROTO >= 3) -------------------------------
+# Wire layout: [0xA5 magic][seq][12 x uint16 LE centidegrees][crc8], 27 bytes
+# against ~47 for the ASCII form.  Centidegrees end the whole-degree
+# quantisation the ASCII %.0f encoding imposed -- the four shoulder channels
+# command ~0.31 deg of amplitude and were flattened to a constant integer by
+# it.  The CRC makes wire corruption detectable instead of parseable-garbage,
+# and the firmware drops a bad frame silently and counts it (CRC_FAIL in
+# STATUS), because printing an error per corrupt frame is itself the timing
+# hazard that corrupts the next frame.
+
+BINARY_FRAME_MAGIC = 0xA5
+BINARY_PROTOCOL_MIN_VERSION = 3
+
+# STATUS fields the firmware reports for link health, forwarded verbatim into
+# the bridge's status line (lowercased) for the GUI DIAGNOSTICS tab.
+FIRMWARE_COUNTER_FIELDS = (
+    "FRAMES_ASCII",
+    "FRAMES_BIN",
+    "CRC_FAIL",
+    "SEQ_GAP",
+    "LOOP_MAX_US",
+    "I2C_MAX_US",
+    "LED_SHOWS",
+    "SRAM_FREE",
+)
+
+
+def crc8_maxim(data):
+    """CRC-8 Dallas/Maxim (reflected poly 0x8C, init 0x00), bit-for-bit the
+    firmware's crc8Maxim().  Reference vector: crc8(b"123456789") == 0xA1."""
+    crc = 0x00
+    for byte in bytes(data):
+        for _ in range(8):
+            mix = (crc ^ byte) & 0x01
+            crc >>= 1
+            if mix:
+                crc ^= 0x8C
+            byte >>= 1
+    return crc
+
+
+def format_binary_frame(values, sequence):
+    """Encode one binary FRAME for firmware PROTO >= 3."""
+    if len(values) != 12:
+        raise ValueError("FRAME requires exactly 12 channel values")
+    if not isinstance(sequence, int) or not 0 <= sequence <= 255:
+        raise ValueError("binary FRAME sequence must be an integer 0..255")
+    body = bytearray([sequence])
+    for value in values:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("FRAME values must be finite")
+        centideg = int(round(min(max(value, 0.0), 180.0) * 100.0))
+        body.append(centideg & 0xFF)
+        body.append((centideg >> 8) & 0xFF)
+    return bytes([BINARY_FRAME_MAGIC]) + bytes(body) + bytes([crc8_maxim(body)])
 
 
 def _bounded_integer(value, low, high, field_name):
@@ -277,6 +335,9 @@ class ArduinoProtocolState:
     led_effect: str = ""
     led_speed_ms: int = 0
     led_error: str = ""
+    # Firmware link-health counters from the latest OK STATUS, keyed by the
+    # names in FIRMWARE_COUNTER_FIELDS.
+    firmware_counters: dict = field(default_factory=dict)
 
     @property
     def can_stream_frames(self):
@@ -712,6 +773,9 @@ class ArduinoProtocolState:
             self._consume_capability_fields(line)
             self._consume_face_fields(line)
             fields = self._status_fields(line)
+            for counter in FIRMWARE_COUNTER_FIELDS:
+                if counter in fields:
+                    self.firmware_counters[counter] = fields[counter]
             if fields.get("ARMED") in ("0", "1"):
                 self.armed = fields["ARMED"] == "1"
             if fields.get("OUTPUT") in ("0", "1"):

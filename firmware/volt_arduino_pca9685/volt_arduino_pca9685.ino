@@ -44,7 +44,18 @@ const uint8_t FACE_BRIGHTNESS_LIMIT = 160;
 const bool FACE_OFF_ON_DISARM = false;
 const uint16_t MIN_FACE_SPEED_MS = 10;
 const uint16_t MAX_FACE_SPEED_MS = 60000;
-const uint16_t FACE_FRAME_PERIOD_MS = 25;
+// 15 Hz, not 40: every show() masks interrupts for ~240 us against an ~80 us
+// UART tolerance, so each transmission is a gamble that no frame byte is in
+// flight.  15 Hz is visually indistinguishable for an 8-pixel face and takes
+// 62% fewer gambles per second.
+const uint16_t FACE_FRAME_PERIOD_MS = 67;
+
+// Compile-time kill switch for the A/B timing test: build with 0 and every
+// NeoPixel transmission is compiled out (the face logic still runs, so FACE
+// commands still parse and acknowledge).  If serial corruption counters go
+// quiet with this at 0 and return at 1, the corruption is show()'s interrupt
+// blackout and nothing else.
+#define FACE_LEDS_ENABLED 1
 
 Adafruit_NeoPixel facePixels(
   NUM_FACE_LEDS,
@@ -129,9 +140,48 @@ const uint32_t BAUD_RATE = 250000;
 // This avoids mistaking a momentarily empty Arduino RX ring for a quiet wire
 // when a USB-UART packet is still arriving.
 const uint16_t SERIAL_IDLE_BEFORE_FACE_US = 1000;
-const uint16_t PROTOCOL_VERSION = 2;
+// PROTO 3 adds the binary FRAME path (magic 0xA5, sequence, 12 x uint16
+// centidegrees, CRC-8).  The host uses binary only when the banner reports
+// PROTO>=3, so this firmware remains compatible with an older bridge and an
+// older firmware remains compatible with the new bridge.
+const uint16_t PROTOCOL_VERSION = 3;
+// 50 Hz is the conservative default every calibration to date was measured
+// at.  The TD-8130MG is digital and should accept 250-333 Hz, which would
+// cut command-to-pulse latency to <=4 ms and improve pulse resolution from
+// ~0.49 deg/tick to ~0.10 deg/tick -- but the PCA9685 prescaler rounds, so
+// the real period at 250 Hz is ~2% off nominal and every pulse-width constant
+// effectively rescales.  Do not raise this without bench-verifying one leg
+// against a protractor at stand, min, and max angles first.
 const uint16_t SERVO_FREQ_HZ = 50;
 const uint16_t SERVO_PERIOD_US = 1000000UL / SERVO_FREQ_HZ;
+
+// ---- Binary FRAME path (PROTO 3) -----------------------------------------
+// Layout after the magic byte: [seq][24 bytes: 12 x uint16 LE centideg][crc8]
+// CRC-8 Dallas/Maxim (reflected poly 0x8C) over seq+payload.  On any failure
+// the frame is dropped SILENTLY and a counter increments: printing an error
+// per corrupt frame lengthens the very loop blackout that corrupts frames,
+// which is the self-amplifying failure the old ASCII path suffered from.
+const uint8_t BIN_FRAME_MAGIC = 0xA5;
+const uint8_t BIN_FRAME_BODY_LEN = 26;   // seq + 24 payload + crc
+// A binary frame stalled longer than this mid-body is a truncated stream,
+// not jitter: at 250000 baud the whole body takes ~1.1 ms.
+const uint32_t BIN_FRAME_STALL_US = 20000UL;
+
+uint8_t binBuffer[BIN_FRAME_BODY_LEN];
+uint8_t binLength = 0;
+bool binActive = false;
+bool binHaveLastSeq = false;
+uint8_t binLastSeq = 0;
+
+// ---- Link/loop instrumentation (STATUS-surfaced) -------------------------
+uint32_t framesRxAscii = 0;
+uint32_t framesRxBin = 0;
+uint32_t binCrcFailCount = 0;
+uint32_t binSeqGapCount = 0;
+uint16_t maxLoopUs = 0;      // worst loop() duration since last STATUS
+uint16_t maxI2cUs = 0;       // worst servo I2C write burst since last STATUS
+uint32_t ledShowCount = 0;   // NeoPixel show() transmissions
+bool frameJustApplied = false;
 
 const uint16_t CHANNEL_MIN_US[CHANNEL_COUNT] = {
   600, 600, 600,
@@ -675,8 +725,11 @@ void updateFaceLeds() {
   }
 
   // One show transmits the 8-pixel buffer to both parallel strips. At most
-  // 40 animation frames/s are sent, and static faces transmit only on change.
+  // 15 animation frames/s are sent, and static faces transmit only on change.
+#if FACE_LEDS_ENABLED
   facePixels.show();
+  ledShowCount++;
+#endif
   faceFrameDirty = false;
 }
 
@@ -703,6 +756,43 @@ void writeChannel(uint8_t channel, float angleDeg) {
   uint16_t pulseUs = angleToPulseUs(channel, angleDeg);
   pwm.setPWM(channel, 0, pulseUsToTicks(pulseUs));
   channelOutputInitialized[channel] = true;
+}
+
+// One PCA9685 register burst instead of twelve setPWM() transactions.  Each
+// setPWM() is its own I2C START/addr/reg/4-bytes/STOP (~135 us at 400 kHz);
+// twelve of them cost ~1.6 ms.  With the auto-increment bit set, consecutive
+// LEDn registers accept a single stream -- but the AVR Wire buffer is 32
+// bytes, so the 48 data bytes must go as TWO transactions (channels 0-5 from
+// LED0_ON_L, channels 6-11 from LED6_ON_L), ~0.6 ms each.  A single 48-byte
+// burst is not possible on stock AVR Wire.  Register and address names come
+// from Adafruit_PWMServoDriver.h (PCA9685_LED0_ON_L etc are its macros).
+
+void writeAllChannelsBurst() {
+  uint16_t ticks[CHANNEL_COUNT];
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    ticks[channel] =
+      pulseUsToTicks(angleToPulseUs(channel, currentDeg[channel]));
+  }
+  uint32_t startUs = micros();
+  for (uint8_t half = 0; half < 2; ++half) {
+    uint8_t first = half * 6;
+    Wire.beginTransmission(PCA9685_I2C_ADDRESS);
+    Wire.write((uint8_t)(PCA9685_LED0_ON_L + 4 * first));
+    for (uint8_t channel = first; channel < first + 6; ++channel) {
+      Wire.write((uint8_t)0x00);                    // ON low
+      Wire.write((uint8_t)0x00);                    // ON high
+      Wire.write((uint8_t)(ticks[channel] & 0xFF)); // OFF low
+      Wire.write((uint8_t)(ticks[channel] >> 8));   // OFF high
+    }
+    Wire.endTransmission();
+  }
+  uint32_t burstUs = (uint32_t)(micros() - startUs);
+  if (burstUs > maxI2cUs) {
+    maxI2cUs = burstUs > 65535UL ? 65535U : (uint16_t)burstUs;
+  }
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    channelOutputInitialized[channel] = true;
+  }
 }
 
 void disableOutputs() {
@@ -737,10 +827,15 @@ void updateServos() {
   lastUpdateMs = now;
   float maxStep = MAX_DEG_PER_SECOND * dt;
 
+  bool needWrite[CHANNEL_COUNT];
+  uint8_t validCount = 0;
+  bool anyWrite = false;
   for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    needWrite[channel] = false;
     if (!targetValid[channel]) {
       continue;
     }
+    ++validCount;
     float error = targetDeg[channel] - currentDeg[channel];
     bool moved = fabs(error) > 0.001f;
     if (error > maxStep) {
@@ -750,6 +845,23 @@ void updateServos() {
     }
     currentDeg[channel] += error;
     if (moved || !channelOutputInitialized[channel]) {
+      needWrite[channel] = true;
+      anyWrite = true;
+    }
+  }
+  if (!anyWrite) {
+    return;
+  }
+  // The burst writes all twelve LED registers, so it is only correct once
+  // every channel has a valid target (a FRAME provides all twelve at once).
+  // Before that -- e.g. single-channel SERVO commands during bring-up -- the
+  // legacy per-channel path avoids energizing untargeted outputs.
+  if (validCount == CHANNEL_COUNT) {
+    writeAllChannelsBurst();
+    return;
+  }
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    if (needWrite[channel]) {
       writeChannel(channel, currentDeg[channel]);
     }
   }
@@ -909,6 +1021,16 @@ void printCapabilityFields() {
   printHostSyncFields();
 }
 
+// Free SRAM between the heap break and the current stack top.  The binary
+// parser, the counters, and the two NeoPixel strip buffers all share 2 KB;
+// if this drops below ~300 bytes under load, stop adding features.
+int freeSramBytes() {
+  extern int __heap_start, *__brkval;
+  int stackTop;
+  return (int)&stackTop
+    - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+}
+
 void printStatus() {
   Serial.print(F("OK STATUS"));
   printCapabilityFields();
@@ -918,6 +1040,28 @@ void printStatus() {
   Serial.print(outputEnabled ? 1 : 0);
   Serial.print(F(" LAST_CMD_MS="));
   Serial.print(millis() - lastCommandMs);
+  // Link-health counters (stage-1 acceptance: CRC_FAIL and SEQ_GAP stay 0
+  // over 60 s of walking with the face animating).  The two *_MAX_US maxima
+  // are per-interval: printing resets them, so each STATUS reports the worst
+  // case since the previous STATUS.
+  Serial.print(F(" FRAMES_ASCII="));
+  Serial.print(framesRxAscii);
+  Serial.print(F(" FRAMES_BIN="));
+  Serial.print(framesRxBin);
+  Serial.print(F(" CRC_FAIL="));
+  Serial.print(binCrcFailCount);
+  Serial.print(F(" SEQ_GAP="));
+  Serial.print(binSeqGapCount);
+  Serial.print(F(" LOOP_MAX_US="));
+  Serial.print(maxLoopUs);
+  Serial.print(F(" I2C_MAX_US="));
+  Serial.print(maxI2cUs);
+  Serial.print(F(" LED_SHOWS="));
+  Serial.print(ledShowCount);
+  Serial.print(F(" SRAM_FREE="));
+  Serial.print(freeSramBytes());
+  maxLoopUs = 0;
+  maxI2cUs = 0;
   printFaceStatusFields();
   Serial.println();
 }
@@ -987,6 +1131,17 @@ bool handleFrame(char **cursor) {
   // Track the host cadence so the face transmitter can find a gap that will
   // not collide with the next frame.  Gaps longer than 200 ms mean the stream
   // stopped rather than jittered, so they must not widen the estimate.
+  noteFrameApplied();
+  framesRxAscii++;
+  if (ACK_FRAME_COMMANDS) {
+    Serial.println(F("OK FRAME"));
+  }
+  return true;
+}
+
+// Shared bookkeeping for both frame encodings: host-cadence tracking for the
+// face transmitter, liveness refresh, and the post-frame face slot flag.
+void noteFrameApplied() {
   uint32_t nowUs = micros();
   if (lastFrameParsedUs != 0) {
     uint32_t delta = (uint32_t)(nowUs - lastFrameParsedUs);
@@ -1003,10 +1158,70 @@ bool handleFrame(char **cursor) {
   consecutiveFrameRejects = 0;
   lastCommandMs = millis();
   timeoutWarned = false;
-  if (ACK_FRAME_COMMANDS) {
-    Serial.println(F("OK FRAME"));
+  frameJustApplied = true;
+}
+
+// CRC-8 Dallas/Maxim, reflected polynomial 0x8C, init 0x00.  Bitwise on
+// purpose: a 256-byte lookup table would cost 12% of the Nano's SRAM.
+// Reference vector: crc8 of "123456789" is 0xA1.
+uint8_t crc8Maxim(const uint8_t *data, uint8_t length) {
+  uint8_t crc = 0x00;
+  for (uint8_t index = 0; index < length; ++index) {
+    uint8_t byte = data[index];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      uint8_t mix = (crc ^ byte) & 0x01;
+      crc >>= 1;
+      if (mix) {
+        crc ^= 0x8C;
+      }
+      byte >>= 1;
+    }
   }
-  return true;
+  return crc;
+}
+
+// Complete binary frame body received: validate, count, apply.  Corruption is
+// counted and dropped in silence -- see the BIN_FRAME_MAGIC comment.
+void processBinaryFrame() {
+  binActive = false;
+  if (crc8Maxim(binBuffer, BIN_FRAME_BODY_LEN - 1)
+      != binBuffer[BIN_FRAME_BODY_LEN - 1]) {
+    binCrcFailCount++;
+    return;
+  }
+  uint8_t sequence = binBuffer[0];
+  if (binHaveLastSeq && (uint8_t)(sequence - binLastSeq) != 1) {
+    binSeqGapCount++;
+  }
+  binHaveLastSeq = true;
+  binLastSeq = sequence;
+
+  if (!servoArmed) {
+    // The host is alive and streaming; refresh liveness but move nothing.
+    // No print: a disarmed board answering 60 frames/s would flood the wire.
+    lastCommandMs = millis();
+    return;
+  }
+
+  float values[CHANNEL_COUNT];
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    uint16_t centideg = (uint16_t)binBuffer[1 + 2 * channel]
+      | ((uint16_t)binBuffer[2 + 2 * channel] << 8);
+    if (centideg > 18000U) {
+      // Structurally valid but semantically impossible; treat as corruption
+      // the CRC happened not to catch.
+      binCrcFailCount++;
+      return;
+    }
+    values[channel] = centideg * 0.01f;
+  }
+
+  enableOutputsForMotion();
+  for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+    setTargetChannel(channel, values[channel]);
+  }
+  noteFrameApplied();
+  framesRxBin++;
 }
 
 bool handleServo(char **cursor) {
@@ -1436,9 +1651,32 @@ bool parseCommand(char *line) {
 }
 
 void readSerialLines() {
+  // A binary frame that stalls mid-body means the stream died or a byte was
+  // lost; abandon it so the parser cannot wedge waiting for byte 26.
+  if (binActive
+      && (uint32_t)(micros() - lastSerialByteUs) > BIN_FRAME_STALL_US) {
+    binActive = false;
+    binCrcFailCount++;
+  }
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     lastSerialByteUs = micros();
+    if (binActive) {
+      binBuffer[binLength++] = (uint8_t)c;
+      if (binLength >= BIN_FRAME_BODY_LEN) {
+        processBinaryFrame();
+      }
+      continue;
+    }
+    // The magic byte is only a frame start at line-idle; inside an ASCII line
+    // it is ordinary (if invalid) text and the line parser rejects it.
+    if (lineLength == 0
+        && !discardLineUntilNewline
+        && (uint8_t)c == BIN_FRAME_MAGIC) {
+      binActive = true;
+      binLength = 0;
+      continue;
+    }
     if (discardLineUntilNewline) {
       if (c == '\n') {
         discardLineUntilNewline = false;
@@ -1470,6 +1708,7 @@ void readSerialLines() {
 bool serialIdleForFace() {
   return lineLength == 0
     && !discardLineUntilNewline
+    && !binActive
     && Serial.available() == 0
     && (uint32_t)(micros() - lastSerialByteUs)
       >= SERIAL_IDLE_BEFORE_FACE_US;
@@ -1497,11 +1736,13 @@ void setup() {
   Serial.begin(BAUD_RATE);
   // begin()+show() makes the face dark immediately. Startup animation begins
   // only after PCA9685 initialization and does not block serial or servos.
+#if FACE_LEDS_ENABLED
   facePixels.begin();
   facePixels.setBrightness(effectiveFaceBrightness());
   appliedFaceBrightness = effectiveFaceBrightness();
   facePixels.clear();
   facePixels.show();
+#endif
   clearLogicalFacePixels();
   Wire.begin();
   pwm.begin();
@@ -1510,6 +1751,22 @@ void setup() {
   Wire.setClock(400000L);
   pwm.setPWMFreq(SERVO_FREQ_HZ);
   delay(10);
+
+  // The register burst in writeAllChannelsBurst() depends on the MODE1
+  // auto-increment bit.  Current Adafruit libraries happen to set it inside
+  // setPWMFreq(), but that is their implementation detail -- assert it
+  // explicitly so a library update cannot silently scramble all 12 outputs.
+  Wire.beginTransmission(PCA9685_I2C_ADDRESS);
+  Wire.write((uint8_t)PCA9685_MODE1);
+  Wire.endTransmission();
+  Wire.requestFrom((int)PCA9685_I2C_ADDRESS, 1);
+  uint8_t mode1 = Wire.available() ? (uint8_t)Wire.read() : (uint8_t)0x00;
+  if ((mode1 & MODE1_AI) == 0) {
+    Wire.beginTransmission(PCA9685_I2C_ADDRESS);
+    Wire.write((uint8_t)PCA9685_MODE1);
+    Wire.write((uint8_t)(mode1 | MODE1_AI));
+    Wire.endTransmission();
+  }
 
   for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
     targetDeg[channel] = CHANNEL_SAFE_START_DEG[channel];
@@ -1530,6 +1787,7 @@ void setup() {
 }
 
 void loop() {
+  uint32_t loopStartUs = micros();
   readSerialLines();
 
   if (
@@ -1552,10 +1810,23 @@ void loop() {
   // 2.5 ms at 250000 baud, so a full frame cannot be lost behind it.
   if (lineLength == 0 && !discardLineUntilNewline) {
     updateServos();
-    // Recheck after I2C: a new command may have arrived while servos updated.
-    // The face additionally needs a quiet wire AND room before the next frame.
-    if (serialIdleForFace() && faceWindowSafe()) {
-      updateFaceLeds();
+    // Face policy differs by regime.  While a host FRAME stream exists, the
+    // only deterministic quiet window is the one that just opened: the frame
+    // was parsed and its I2C write is done, so the next frame is a full host
+    // period away and a ~240 us show() cannot collide with expected bytes.
+    // faceWindowSafe()'s cadence *prediction* is kept only for the idle
+    // regime, where there is no stream to collide with.
+    if (serialIdleForFace()) {
+      bool streaming = frameIntervalUs != 0;
+      if (streaming ? frameJustApplied : faceWindowSafe()) {
+        updateFaceLeds();
+      }
     }
+  }
+  frameJustApplied = false;
+
+  uint32_t loopUs = (uint32_t)(micros() - loopStartUs);
+  if (loopUs > maxLoopUs) {
+    maxLoopUs = loopUs > 65535UL ? 65535U : (uint16_t)loopUs;
   }
 }
