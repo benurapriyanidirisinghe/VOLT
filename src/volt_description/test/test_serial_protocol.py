@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from volt_serial_protocol import (
+    _STATUS_FIELD,
     BINARY_FRAME_MAGIC,
     BINARY_PROTOCOL_MIN_VERSION,
     FIRMWARE_COUNTER_FIELDS,
@@ -684,8 +685,17 @@ class BinaryFrameTests(unittest.TestCase):
         self.assertIn("crc ^= 0x8C;", firmware)
         # Silent-drop contract: the binary reject path must never print.
         self.assertNotIn("ERR CRC", firmware)
+        flat = firmware.replace('F(" ', '').replace('")', '')
         for counter in FIRMWARE_COUNTER_FIELDS:
-            self.assertIn(counter + "=", firmware.replace('F(" ', '').replace('")', ''))
+            self.assertIn(counter + "=", flat)
+            # _STATUS_FIELD is r"\b([A-Z_]+)=..." so a digit anywhere in a
+            # field name makes it silently unparseable. I2C_MAX_US was lost
+            # to exactly that and reported as "?" in the GUI.
+            self.assertRegex(counter, r"^[A-Z_]+$")
+            self.assertTrue(
+                _STATUS_FIELD.findall("%s=1" % counter),
+                "%s is not capturable by the status regex" % counter,
+            )
 
 
 if __name__ == "__main__":

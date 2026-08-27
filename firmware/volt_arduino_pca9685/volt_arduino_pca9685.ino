@@ -179,6 +179,7 @@ uint32_t framesRxBin = 0;
 uint32_t binCrcFailCount = 0;
 uint32_t binSeqGapCount = 0;
 uint16_t maxLoopUs = 0;      // worst loop() duration since last STATUS
+bool loopSampleSuppressed = false;  // set while a long reply is being printed
 uint16_t maxI2cUs = 0;       // worst servo I2C write burst since last STATUS
 uint32_t ledShowCount = 0;   // NeoPixel show() transmissions
 bool frameJustApplied = false;
@@ -1032,6 +1033,11 @@ int freeSramBytes() {
 }
 
 void printStatus() {
+  // A STATUS reply is a few hundred bytes; beyond the 64-byte TX ring
+  // Serial.print blocks at ~40 us/byte, so the loop that prints it is not a
+  // representative loop.  Suppress that pass, otherwise LOOP_MAX_US reports
+  // the cost of its own reporting (~16 ms) and hides the real worst case.
+  loopSampleSuppressed = true;
   Serial.print(F("OK STATUS"));
   printCapabilityFields();
   Serial.print(F(" ARMED="));
@@ -1054,7 +1060,7 @@ void printStatus() {
   Serial.print(binSeqGapCount);
   Serial.print(F(" LOOP_MAX_US="));
   Serial.print(maxLoopUs);
-  Serial.print(F(" I2C_MAX_US="));
+  Serial.print(F(" BUS_MAX_US="));
   Serial.print(maxI2cUs);
   Serial.print(F(" LED_SHOWS="));
   Serial.print(ledShowCount);
@@ -1826,7 +1832,9 @@ void loop() {
   frameJustApplied = false;
 
   uint32_t loopUs = (uint32_t)(micros() - loopStartUs);
-  if (loopUs > maxLoopUs) {
+  if (loopSampleSuppressed) {
+    loopSampleSuppressed = false;
+  } else if (loopUs > maxLoopUs) {
     maxLoopUs = loopUs > 65535UL ? 65535U : (uint16_t)loopUs;
   }
 }

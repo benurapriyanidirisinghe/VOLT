@@ -511,7 +511,7 @@ class MeasureWindow(QMainWindow):
                 fields.get("fw_frames_bin", "?"),
                 fields.get("fw_frames_ascii", "?"),
                 fields.get("fw_loop_max_us", "?"),
-                fields.get("fw_i2c_max_us", "?"),
+                fields.get("fw_bus_max_us", "?"),
                 fields.get("fw_led_shows", "?"),
                 fields.get("fw_sram_free", "?"),
                 fields.get("armed", "?"), fields.get("streaming", "?"),

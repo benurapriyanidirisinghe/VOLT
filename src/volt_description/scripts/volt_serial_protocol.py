@@ -155,13 +155,16 @@ BINARY_PROTOCOL_MIN_VERSION = 3
 
 # STATUS fields the firmware reports for link health, forwarded verbatim into
 # the bridge's status line (lowercased) for the GUI DIAGNOSTICS tab.
+# Names must be [A-Z_] only: _STATUS_FIELD is r"\b([A-Z_]+)=..." and silently
+# fails to capture any field containing a digit.  I2C_MAX_US was unparseable
+# for exactly that reason and reported as "?" in the GUI.
 FIRMWARE_COUNTER_FIELDS = (
     "FRAMES_ASCII",
     "FRAMES_BIN",
     "CRC_FAIL",
     "SEQ_GAP",
     "LOOP_MAX_US",
-    "I2C_MAX_US",
+    "BUS_MAX_US",
     "LED_SHOWS",
     "SRAM_FREE",
 )

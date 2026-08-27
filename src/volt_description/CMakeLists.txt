@@ -57,6 +57,7 @@ install(
     scripts/volt_run_all.py
     scripts/volt_servo_calibration.py
     scripts/volt_servo_calibration_gui.py
+    scripts/volt_stand_calibration_gui.py
     scripts/volt_serial_protocol.py
     scripts/volt_serial_bridge.py
   DESTINATION lib/${PROJECT_NAME}
