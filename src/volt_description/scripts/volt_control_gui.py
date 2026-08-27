@@ -91,13 +91,17 @@ GAIT_LIMITS = {
     for name, config in GAITS.items()
 }
 
+# Ordered slowest to fastest: STOP walks DOWN this list rather than halting a
+# fast gait mid-cycle.
 GAIT_SEQUENCE = (
     "amble",
     "trot",
+    "run",
 )
 GAIT_DISPLAY_NAMES = {
     "amble": "AMBLE",
     "trot": "TROT",
+    "run": "RUN",
 }
 DEFAULT_GAIT = "amble"
 DEFAULT_SPEED_PERCENT = 20
@@ -1685,12 +1689,15 @@ class VoltControlWindow(QMainWindow):
             diagnostic_layout.addWidget(button, 1 + index // 2, (index % 2) * 2, 1, 2)
             self.diagnostic_buttons.append(button)
         self.run_gait_button = QPushButton("G — SELECT RUN")
-        self.run_gait_button.setEnabled(False)
+        self.run_gait_button.clicked.connect(
+            lambda: self.select_diagnostic_gait("run")
+        )
         self.run_gait_button.setToolTip(
-            "RUN is a stage-3 gait: a fast trot stepped toward duty < 0.5 "
-            "behind hard entry gates (zero link errors over 60 s, clearance "
-            ">= 8% of module span on all four feet, roll 1x < 2x). The "
-            "button enables when the gait exists in the engine."
+            "RUN is a fast trot: 1.30 Hz at duty 0.50, the fastest the servo "
+            "budget accepts. Entry gates before driving it: zero CRC failures "
+            "and sequence gaps over 60 s, clearance >= 8% of module span on "
+            "all four feet, roll 1x below 2x. STOP decelerates through TROT "
+            "rather than halting mid-cycle."
         )
         diagnostic_layout.addWidget(self.run_gait_button, 4, 0, 1, 4)
         self.stop_diagnostic_button = QPushButton("STOP DIAGNOSTIC")
@@ -3297,6 +3304,16 @@ class VoltControlWindow(QMainWindow):
         if action in ("stop", "sit"):
             self.joystick.set_vector(0.0, 0.0)
             self.yaw_slider.setValue(0)
+            # Decelerate through the slower gait rather than halting a fast
+            # one mid-cycle: RUN carries the body on two diagonal feet with a
+            # short stance, and stopping dead there drops the robot onto
+            # whichever diagonal happens to be down.
+            if self.current_gait == "run":
+                self.select_gait("trot")
+                self.status_detail.setText(
+                    "Decelerating through TROT before stopping."
+                )
+                self.status_detail.setStyleSheet("color: #7dd3fc;")
         if action in ("stand", "sit", "step") and self.command_owner != "MOTION":
             self.status_detail.setText(
                 "Action blocked: press ENABLE MOTION to grant ROS command ownership."

@@ -322,9 +322,14 @@ class ServoCalibrationTests(unittest.TestCase):
         # output is unchanged -- ch2 still 62.169, ch5 still 118.051 -- which
         # is why the robot stands identically either way and why this fault
         # was invisible to every symmetric motion, push-ups included.
+        # Entry 5 (front_right_foot) now carries -6.834 deg, measured on the
+        # robot with the stand-calibration tool: that leg did not reach the
+        # ground at the canonical stand and needs 7.7 mm of extension. It is a
+        # real mechanical shortfall being compensated, not a levelling
+        # preference, so this reference tracks it.
         previously_leveled_pose = [
             0.050, 0.499, -1.0812,
-            -0.050, 0.499, -1.085,
+            -0.050, 0.499, -0.9619,
             0.050, 0.696, -1.0812,
             -0.050, 0.696, -1.081,
         ]

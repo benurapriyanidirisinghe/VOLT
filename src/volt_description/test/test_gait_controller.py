@@ -51,8 +51,20 @@ def run_cycle(controller, velocity, seconds, dt=0.005, now_start=0.0,
 
 
 class ConfigurationTests(unittest.TestCase):
-    def test_exactly_two_gaits_exist(self):
-        self.assertEqual(sorted(GAITS), ["amble", "trot"])
+    def test_exactly_the_three_registered_gaits_exist(self):
+        # Pinned deliberately. The walking rebuild collapsed a dozen historical
+        # gait names down to two, and the aliases below keep them collapsed;
+        # RUN is the one addition since, a fast trot rather than a new
+        # coordination. Anything appearing here that is not in this list is a
+        # regression toward that proliferation.
+        self.assertEqual(sorted(GAITS), ["amble", "run", "trot"])
+
+    def test_builtin_defaults_cover_every_registered_phase_table(self):
+        # The YAML loader and the builtin fallback must agree on which gaits
+        # exist, or a YAML failure would leave the GUI offering a gait the
+        # engine cannot select.
+        from volt_gait_controller import GAIT_PHASE_OFFSETS, _builtin_gaits
+        self.assertEqual(sorted(_builtin_gaits()), sorted(GAIT_PHASE_OFFSETS))
 
     def test_every_config_key_is_declared(self):
         for name, config in GAITS.items():

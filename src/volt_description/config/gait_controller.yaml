@@ -106,3 +106,40 @@ volt_motion_controller:
         joint_acceleration_limit_deg_s2: 6500.0
         stance_velocity_budget_deg_s: 80.0
         swing_velocity_budget_deg_s: 190.0
+
+      # RUN: a fast trot, not a new coordination. 1.30 Hz at duty 0.50 is
+      # the FASTEST configuration validate_servo_budget will accept -- above
+      # it the shorter swing pushes the unloaded leg past its 190 deg/s
+      # budget, so this is the wall on this hardware rather than a choice.
+      #
+      # It is deliberately NOT the plan's "body height -10 to -15%": lowering
+      # the body lengthens the knee moment arm, which takes the knee from
+      # 105% to 148% of usable stall. Crouching to run makes running harder
+      # on this robot.
+      #
+      # Duty is the ladder to walk downward from here (0.50 -> 0.47 -> 0.45),
+      # one recording per step, watching that the vertical bob stays
+      # dominated by its 2x component. If the 1x overtakes it, the diagonals
+      # are desynchronising under load: back off a rung.
+      #
+      # Entry gates before this gait is driven at all: zero CRC failures and
+      # zero sequence gaps over 60 s, foot clearance at least 8% of module
+      # span on all four feet, and roll 1x below 2x.
+      run:
+        type: run
+        cycle_period: 0.77
+        duty_factor: 0.50
+        step_height: 0.026
+        max_x: 0.096
+        max_y: 0.05
+        max_yaw: 0.50
+        settle_time: 0.6
+        body_sway_y: 0.0
+        body_height_offset: 0.0
+        velocity_filter_alpha: 0.30
+        command_acceleration: 0.10
+        hardware_speed_scale: 0.80
+        joint_velocity_limit_deg_s: 190.0
+        joint_acceleration_limit_deg_s2: 6500.0
+        stance_velocity_budget_deg_s: 80.0
+        swing_velocity_budget_deg_s: 190.0

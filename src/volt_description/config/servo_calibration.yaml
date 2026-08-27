@@ -76,7 +76,7 @@ servos:
     pca_channel: 2
     direction: -1
     neutral_deg: 0.0
-    trim_deg: 0.22
+    trim_deg: -6.834
     min_deg: 0.0
     max_deg: 150.0
     min_pulse_us: 600

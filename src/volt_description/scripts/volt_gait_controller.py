@@ -106,9 +106,17 @@ GAIT_ALIASES = {
     "fast_trot": "trot",
 }
 
+# RUN is a trot pattern, not a new coordination: the same diagonal pairs, run
+# faster and with a shorter stance.  A true run needs duty < 0.5 and a flight
+# phase; on open-loop hobby servos with a documented saturation history that
+# is approached in steps, not declared.  It ships at the fastest cadence the
+# servo budget will accept.
+RUN_PHASE_OFFSETS = dict(TROT_PHASE_OFFSETS)
+
 GAIT_PHASE_OFFSETS = {
     "trot": TROT_PHASE_OFFSETS,
     "amble": AMBLE_PHASE_OFFSETS,
+    "run": RUN_PHASE_OFFSETS,
 }
 
 # Config keys: every gait section must provide exactly these numeric fields.
@@ -162,7 +170,7 @@ def validate_phase_structure(name, offsets):
             "%s phase table must cover exactly %s" % (name, list(LEG_ORDER))
         )
 
-    if name == "trot":
+    if name in ("trot", "run"):
         # Two-beat: diagonal partners strike together, and the two diagonal
         # pairs are half a cycle apart (which also makes each ipsilateral
         # pair half a cycle apart -- the property that distinguishes a trot
@@ -180,7 +188,8 @@ def validate_phase_structure(name, offsets):
             if abs(gap - 0.5) > 0.02:
                 raise ValueError(
                     "%s: ipsilateral pair %s/%s is %.3f cycles apart, expected "
-                    "0.5 -- same-side legs moving together is a PACE, not a trot"
+                    "0.5 -- same-side legs moving together is a PACE, not a "
+                    "two-beat diagonal gait"
                     % (name, a, b, gap)
                 )
         return True
@@ -351,7 +360,18 @@ def _validate_gait_config(name, raw):
 
     if not 0.4 <= config["cycle_period"] <= 4.0:
         raise ValueError("%s cycle_period must be in [0.4, 4.0] s" % name)
-    duty_low, duty_high = (0.52, 0.68) if name == "trot" else (0.70, 0.86)
+    # RUN reaches below a trot's floor on purpose: duty under 0.5 is what
+    # distinguishes a run from a trot, and the ladder is meant to walk down
+    # toward it. It is bounded above by the trot's floor so a "run" cannot be
+    # configured into an ordinary trot by accident, and floored at 0.42
+    # because a flight phase on open-loop servos is not a stable place to
+    # arrive at blind.
+    duty_bounds = {
+        "trot": (0.52, 0.68),
+        "run": (0.42, 0.56),
+        "amble": (0.70, 0.86),
+    }
+    duty_low, duty_high = duty_bounds.get(name, (0.70, 0.86))
     if not duty_low <= config["duty_factor"] <= duty_high:
         raise ValueError(
             "%s duty_factor must be in [%.2f, %.2f]" % (name, duty_low, duty_high)
@@ -526,7 +546,7 @@ def validate_servo_budget(config, speed_scale=1.0):
 
 
 def load_gait_configs(path=None):
-    """Load and validate the two gait sections from the controller YAML."""
+    """Load and validate every gait section from the controller YAML."""
     config_path = Path(path or default_gait_config_path())
     with open(config_path, "r", encoding="utf-8") as handle:
         document = yaml.safe_load(handle) or {}
@@ -538,7 +558,10 @@ def load_gait_configs(path=None):
     if not isinstance(gaits, dict):
         raise ValueError("gait config missing a gaits mapping")
     configs = {}
-    for name in ("trot", "amble"):
+    # Every gait the engine knows a phase table for must be present: a config
+    # that silently omits one would leave the GUI offering a gait the engine
+    # cannot select.
+    for name in sorted(GAIT_PHASE_OFFSETS):
         if name not in gaits:
             raise ValueError("gait config missing the %s gait" % name)
         config = _validate_gait_config(name, gaits[name])
@@ -614,6 +637,28 @@ def _builtin_gaits():
             # cycle, where a fast ramp sometimes locked in a 10-deg rocking
             # mode with most of the stride lost to slip.
             "command_acceleration": 0.08,
+            "hardware_speed_scale": 0.80,
+            "joint_velocity_limit_deg_s": 190.0,
+            "joint_acceleration_limit_deg_s2": 6500.0,
+            "stance_velocity_budget_deg_s": 80.0,
+            "swing_velocity_budget_deg_s": 190.0,
+        }),
+        # RUN: the fastest configuration validate_servo_budget accepts.
+        # Above 1.30 Hz the shorter swing pushes the unloaded leg past its
+        # 190 deg/s budget, so this is a hardware wall, not a preference.
+        "run": _validate_gait_config("run", {
+            "type": "run",
+            "cycle_period": 0.77,
+            "duty_factor": 0.50,
+            "step_height": 0.026,
+            "max_x": 0.096,
+            "max_y": 0.05,
+            "max_yaw": 0.50,
+            "settle_time": 0.6,
+            "body_sway_y": 0.0,
+            "body_height_offset": 0.0,
+            "velocity_filter_alpha": 0.30,
+            "command_acceleration": 0.10,
             "hardware_speed_scale": 0.80,
             "joint_velocity_limit_deg_s": 190.0,
             "joint_acceleration_limit_deg_s2": 6500.0,

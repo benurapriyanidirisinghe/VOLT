@@ -129,7 +129,7 @@ class StandWindow(QMainWindow):
         warning = QLabel(
             "Feet on the ground, servo power reachable. HOLD STAND commands "
             "the canonical WALK_POSE and keeps holding it; nudges take effect "
-            "immediately. Nudging a leg DOWN lengthens it."
+            "immediately on the robot. Nudging a leg DOWN lengthens it."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet(
@@ -362,13 +362,34 @@ class StandWindow(QMainWindow):
             self.hold_timer.stop()
             self.node.publish_owner("HOLD")
 
+    def live_pose(self):
+        """WALK_POSE pre-compensated so nudges act on the robot immediately.
+
+        The bridge applies the trim from the calibration FILE, which it reads
+        once at startup, so editing trims here cannot move anything on its
+        own. To make a nudge visible now, the difference between the working
+        trim and the file trim is folded into the commanded angle instead:
+
+            servo = neutral + trim_file + direction * deg(theta_cmd)
+
+        and we want servo to land where trim_working would put it, so
+
+            theta_cmd = theta_walk + radians((trim_working - trim_file)/dir)
+
+        After SAVE and a bridge restart the file trim carries it and the
+        commanded angle returns to plain WALK_POSE, landing on the same pose.
+        """
+        named = named_positions_from_ordered(K.WALK_POSE)
+        out = []
+        for joint in K.JOINT_NAMES:
+            servo = self.table.servos[joint]
+            delta = self.trims[joint] - float(servo.trim_deg)
+            out.append(named[joint] + math.radians(delta / servo.direction))
+        return out
+
     def publish_hold(self):
-        # WALK_POSE is the canonical commanded stand. The trims are applied by
-        # the serial bridge from the calibration file, so what changes here
-        # only reaches the robot after SAVE and a bridge restart -- the live
-        # hold exists so the legs are loaded while you judge which is short.
         self.node.publish_owner("CALIBRATION")
-        self.node.publish_pose(K.WALK_POSE)
+        self.node.publish_pose(self.live_pose())
 
     def save(self):
         problems = self.violations()
@@ -377,12 +398,39 @@ class StandWindow(QMainWindow):
                 self, "Not saved",
                 "Fix these first:\n\n" + "\n".join(problems))
             return
-        for joint in K.JOINT_NAMES:
-            self.raw["servos"][joint]["trim_deg"] = round(
-                float(self.trims[joint]), 3
-            )
+        # Rewrite ONLY the trim_deg lines, in place. yaml.safe_dump would
+        # round-trip the whole document and silently delete every comment --
+        # and this file's comments carry the ch2/ch5 cross-wiring history and
+        # the reasoning behind the firmware guards, which is not recoverable
+        # from the values alone.
+        with open(self.path, "r", encoding="utf-8") as handle:
+            lines = handle.readlines()
+        current = None
+        written = set()
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.endswith(":") and not stripped.startswith("#"):
+                name = stripped[:-1]
+                if name in self.trims:
+                    current = name
+                elif not line.startswith(" " * 4):
+                    current = None
+            elif current and stripped.startswith("trim_deg:"):
+                indent = line[: len(line) - len(line.lstrip())]
+                lines[index] = "%strim_deg: %s\n" % (
+                    indent, round(float(self.trims[current]), 3)
+                )
+                written.add(current)
+                current = None
+        missing = [j for j in K.JOINT_NAMES if j not in written]
+        if missing:
+            QMessageBox.critical(
+                self, "Not saved",
+                "Could not locate trim_deg for: %s\nFile left untouched."
+                % ", ".join(missing))
+            return
         with open(self.path, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(self.raw, handle, sort_keys=False)
+            handle.writelines(lines)
         QMessageBox.information(
             self, "Saved",
             "Trims written to\n%s\n\nRestart the serial bridge for the robot "
