@@ -67,10 +67,17 @@ ROBOT_MASS_KG = 2.80 + 0.50 + 0.20 + 0.20 + 4 * 0.40
 GRAVITY = 9.81
 
 # TD-8130MG datasheet stall is 2.94 N.m at rated voltage on an unlimited
-# supply. Twelve servos on one shared BEC realistically deliver 60-75%, so the
-# pessimistic figure is what a walking decision should be made against.
+# supply. The usable figure below is MEASURED, not assumed: the robot performs
+# a 60 mm push-up carrying 2 kg of added payload without difficulty, and that
+# manoeuvre demands 2.141 N.m at the front knee -- more than a 5.30 kg trot's
+# 1.855. An earlier 1.76 N.m guess (60% of datasheet, "twelve servos on a
+# shared BEC") was contradicted by that test and made the trot look saturated
+# when it is not.
+#
+# 2.14 N.m is a LOWER bound, since the push-up is easy rather than marginal.
+# Anything derived from it is therefore conservative.
 STALL_DATASHEET_NM = 2.94
-STALL_USABLE_NM = 1.76
+STALL_USABLE_NM = 2.14
 SERVO_FREE_SPEED_DPS = 375.0
 FIRMWARE_SLEW_CEILING_DPS = 240.0
 
@@ -398,7 +405,11 @@ class MeasureWindow(QMainWindow):
             0.0, 1.0 - torque / STALL_USABLE_NM
         )
         lines.append("      loaded stance joints have about %.0f deg/s "
-                     "available at this torque" % available)
+                     "available at this torque (linear speed-torque model "
+                     "against a MEASURED stall floor)" % available)
+        lines.append("      note: stall torque is not stiffness. A servo can "
+                     "hold this load and still droop under it, because the "
+                     "droop is its proportional band, not saturation.")
         lines.append("")
         lines.append("LIMITS  IK-projected legs: %s"
                      % (", ".join(sorted(measurement.projected)) or "none"))
@@ -415,8 +426,9 @@ class MeasureWindow(QMainWindow):
 
     def budget_lines(self):
         lines = []
-        lines.append("mass %.2f kg  weight %.1f N   usable stall %.2f N.m "
-                     "(%.0f%% of the %.2f N.m datasheet figure)"
+        lines.append("mass %.2f kg  weight %.1f N   usable stall >= %.2f N.m "
+                     "(%.0f%% of the %.2f N.m datasheet figure, measured from "
+                     "a 2 kg-loaded push-up)"
                      % (ROBOT_MASS_KG, ROBOT_MASS_KG * GRAVITY,
                         STALL_USABLE_NM,
                         100.0 * STALL_USABLE_NM / STALL_DATASHEET_NM,

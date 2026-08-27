@@ -46,9 +46,21 @@ volt_motion_controller:
     # ----------------------------------------------------------------------
     gaits:
       # Two-beat diagonal trot. A trot carries the whole 52 N on two diagonal
-      # feet, which at the old 0.200 m stance put the front knee at 1.855 N.m
-      # -- 105% of the ~1.76 N.m a TD-8130MG actually delivers on a shared
-      # BEC. That is why the robot shook in place instead of lifting a foot.
+      # feet, putting the front knee at 1.855 N.m at 0.200 m.
+      #
+      # CORRECTION, from a measurement rather than an assumption: that was
+      # previously called 105% of usable stall against a guessed 1.76 N.m.
+      # The robot performs a 60 mm push-up carrying 2 kg of added payload
+      # without difficulty, and that demands 2.141 N.m at the same joint --
+      # MORE than the trot does. Usable stall is therefore at least 2.14 N.m
+      # and the trot sits at 87% or below, so stall torque is NOT what stops
+      # a foot clearing.
+      #
+      # Stall torque is not stiffness. A servo can hold a load and still sag
+      # under it, because the sag is its proportional band, not saturation --
+      # which is consistent with the measured ~18 mm droop against a 20 mm
+      # commanded lift. Compliance and stance traction remain open; stall
+      # torque is closed.
       #
       # The fix is to stand TALLER, not to command more lift. At 0.210 m the
       # leg is 88% extended, the knee moment arm shrinks, and the same load
@@ -142,9 +154,10 @@ volt_motion_controller:
       # stride has not collapsed. Duty ladders DOWN separately (0.50 -> 0.47
       # -> 0.45) toward a flight phase.
       #
-      # None of this makes RUN move while the trot knee sits at 105% of
-      # usable stall: the budget checks commanded joint RATE, not whether the
-      # loaded servo has any speed left to deliver it. Clearance first.
+      # Clearance is still the open question for RUN, but it is no longer a
+      # stall-torque question: see the correction on the trot above. What
+      # remains is servo compliance (proportional-band droop under load) and
+      # stance traction.
       run:
         type: run
         cycle_period: 1.25
