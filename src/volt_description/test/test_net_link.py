@@ -219,6 +219,25 @@ class WifiLaunchTests(unittest.TestCase):
             self.assertNotIn(token, text.lower())
 
 
+def function_body(text, signature):
+    """Source of one top-level C function, by signature.
+
+    Fixed character windows break the moment a comment is added, which is
+    exactly what happened here -- a passing test started failing because the
+    function it checks grew a paragraph of explanation.
+    """
+    start = text.index(signature)
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    raise AssertionError("unbalanced braces after %s" % signature)
+
+
 class Esp32FirmwareTests(unittest.TestCase):
     SKETCH = (
         Path(__file__).resolve().parents[3]
@@ -244,12 +263,12 @@ class Esp32FirmwareTests(unittest.TestCase):
         self.assertLess(safe_start, start_network)
 
     def test_losing_the_host_disarms(self):
-        handler = self.text[self.text.index("void onHostDisconnected()"):][:700]
+        handler = function_body(self.text, "void onHostDisconnected()")
         self.assertIn("holdCurrentPosition();", handler)
         self.assertIn("servoArmed = false;", handler)
 
     def test_a_second_host_is_refused_not_interleaved(self):
-        service = self.text[self.text.index("void serviceNetwork()"):][:1600]
+        service = function_body(self.text, "void serviceNetwork()")
         self.assertIn("ERR BUSY", service)
 
     def test_wifi_power_save_is_disabled(self):
@@ -266,7 +285,7 @@ class Esp32FirmwareTests(unittest.TestCase):
         self.assertIn("int scanAndReportNetworks()", self.text)
         self.assertIn("WiFi.scanNetworks()", self.text)
         self.assertIn("bool joinBestNetwork()", self.text)
-        join = self.text[self.text.index("bool joinBestNetwork()"):][:1400]
+        join = function_body(self.text, "bool joinBestNetwork()")
         self.assertIn("scanAndReportNetworks()", join)
 
     def test_supports_several_configured_networks(self):
@@ -276,13 +295,13 @@ class Esp32FirmwareTests(unittest.TestCase):
 
     def test_joins_the_strongest_visible_network_not_the_first(self):
         """Joining a weak AP when a strong one is present stutters the stream."""
-        chooser = self.text[self.text.index("int bestVisibleNetwork"):][:900]
+        chooser = function_body(self.text, "int bestVisibleNetwork")
         self.assertIn("WiFi.RSSI(index)", chooser)
         self.assertIn("rssi > bestRssi", chooser)
 
     def test_scan_never_runs_while_servos_are_being_driven(self):
         """scanNetworks() blocks for seconds; that would trip the 750 ms disarm."""
-        service = self.text[self.text.index("void serviceNetwork()"):][:1800]
+        service = function_body(self.text, "void serviceNetwork()")
         # The only in-loop rescan sits behind "no WiFi connection", where by
         # definition no host is streaming frames.
         rescan = service.index("joinBestNetwork();")
@@ -290,7 +309,7 @@ class Esp32FirmwareTests(unittest.TestCase):
         self.assertLess(disconnected, rescan)
 
     def test_reports_link_quality_in_status(self):
-        status = self.text[self.text.index("void printStatus()"):][:2500]
+        status = function_body(self.text, "void printStatus()")
         for field in ("WIFI_SSID=", "WIFI_RSSI=", "WIFI_IP="):
             self.assertIn(field, status)
 
@@ -338,6 +357,44 @@ class Esp32FirmwareTests(unittest.TestCase):
         fallback = self.text[self.text.index("#define VOLT_WIFI_NETWORKS"):][:200]
         self.assertIn("CHANGE_ME", fallback)
 
+    def test_frame_stall_window_suits_a_network_transport(self):
+        """20 ms was a UART number and it discarded every split frame.
+
+        TCP does not lose bytes mid-stream, so a gap only means the segment
+        boundary fell inside a frame. The measured loop here reached 27-48 ms
+        on its own, longer than the old window, so a healthy link reported
+        FRAMES_BIN=0 with the host seeing zero drops.
+        """
+        line = [
+            row for row in self.text.splitlines()
+            if row.startswith("const uint32_t BIN_FRAME_STALL_US")
+        ]
+        self.assertTrue(line)
+        microseconds = int(line[0].split("=")[1].strip().rstrip("UL;"))
+        self.assertGreaterEqual(
+            microseconds, 100000,
+            "must exceed the worst observed loop time by a wide margin",
+        )
+        self.assertLess(
+            microseconds, 750000,
+            "must stay under COMMAND_TIMEOUT_MS, which owns a dead link",
+        )
+
+    def test_client_idle_timer_tracks_consumed_bytes(self):
+        """available() reports UNREAD bytes; it hits zero as soon as the
+        parser does its job, so using it declared a live host silent."""
+        self.assertIn("lastClientByteMs = millis();", self.text)
+        reader = function_body(self.text, "void readSerialLines()")
+        self.assertIn("lastClientByteMs = millis();", reader)
+
+    def test_all_parser_buffers_reset_between_clients(self):
+        """A socket changes peers; a UART never did. Leftovers corrupt the
+        next host's first command into ERR UNKNOWN_COMMAND."""
+        handler = function_body(self.text, "void onHostDisconnected()")
+        for field in ("binActive", "binLength", "lineLength",
+                      "discardLineUntilNewline"):
+            self.assertIn(field, handler)
+
     def test_psram_pins_are_not_used_for_io(self):
         """GPIO 35/36/37 carry octal PSRAM on the N16R8 module."""
         for name in ("PIN_I2C_SDA", "PIN_I2C_SCL"):
@@ -352,3 +409,57 @@ class Esp32FirmwareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatusLineLengthTests(unittest.TestCase):
+    """A real ESP32 STATUS must survive the host's line buffer and regex."""
+
+    def test_a_full_esp32_status_line_is_not_dropped(self):
+        """Measured 523 bytes on hardware; at the old 512 limit it vanished.
+
+        An over-length line is DISCARDED, not truncated, so the symptom was
+        "STATUS returns nothing" while PING worked -- which points at
+        everything except the line limit.
+        """
+        from volt_serial_protocol import SerialLineBuffer, _STATUS_FIELD
+
+        line = (
+            "OK STATUS FW=VOLT_PCA9685 PROTO=3 MAX_DPS=240.0 "
+            "FACE_SUPPORTED=1 LED_COUNT=8 HOST_SYNC_REQUIRED=1 HOST_PING=1 "
+            "HOST_SNAPSHOT=0 HOST_SYNCED=0 ARMED=0 OUTPUT=0 "
+            "LAST_CMD_MS=32184 FRAMES_ASCII=0 FRAMES_BIN=0 CRC_FAIL=0 "
+            "SEQ_GAP=0 LOOP_MAX_US=10850 BUS_MAX_US=0 LED_SHOWS=4588 "
+            "SRAM_FREE=253688 WIFI_SSID=NextGen_Starlink_2.4GHz "
+            "WIFI_RSSI=-72 WIFI_IP=192.168.2.100 LED_ENABLED=1 "
+            "LED_COLOR=0,255,255 LED_COLOR_B=0,120,255 LED_BRIGHTNESS=80 "
+            "LED_EFFECTIVE_BRIGHTNESS=80 LED_LIMIT=160 LED_EFFECT=breathe "
+            "LED_SPEED_MS=3000 FACE=neutral\n"
+        )
+        self.assertGreater(len(line), 512, "regression guard needs a long line")
+        buffer = SerialLineBuffer()
+        found, overflow = buffer.feed(line.encode("ascii"))
+        self.assertFalse(overflow, "a real STATUS line must not overflow")
+        self.assertEqual(1, len(found))
+        fields = dict(_STATUS_FIELD.findall(found[0]))
+        self.assertEqual("-72", fields.get("WIFI_RSSI"))
+        self.assertEqual("192.168.2.100", fields.get("WIFI_IP"))
+        self.assertEqual("NextGen_Starlink_2.4GHz", fields.get("WIFI_SSID"))
+
+    def test_a_value_with_a_space_would_be_truncated(self):
+        """Why the firmware substitutes underscores rather than sending spaces."""
+        from volt_serial_protocol import _STATUS_FIELD
+
+        spaced = dict(_STATUS_FIELD.findall(
+            "OK STATUS WIFI_SSID=NextGen Starlink 2.4GHz WIFI_RSSI=-72"
+        ))
+        self.assertEqual("NextGen", spaced.get("WIFI_SSID"))
+
+    def test_firmware_substitutes_spaces_in_the_ssid(self):
+        sketch = (
+            Path(__file__).resolve().parents[3]
+            / "firmware" / "volt_esp32_pca9685" / "volt_esp32_pca9685.ino"
+        )
+        if not sketch.is_file():
+            self.skipTest("ESP32 sketch not present")
+        text = source(sketch)
+        self.assertIn("*cursor == ' ' ? '_' : *cursor", text)

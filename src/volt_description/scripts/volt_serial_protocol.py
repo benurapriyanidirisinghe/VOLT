@@ -76,7 +76,12 @@ _STATUS_FIELD = re.compile(r"\b([A-Z_]+)=([^\s]+)")
 class SerialLineBuffer:
     """Reassemble timeout-fragmented serial bytes into complete text lines."""
 
-    def __init__(self, max_line_bytes=512):
+    # 1024, not 512. A real ESP32 STATUS carrying the WiFi fields measured
+    # 523 bytes on hardware, and at 512 the WHOLE line was dropped as an
+    # overflow -- silently, because an over-length line is discarded rather
+    # than truncated. The symptom was "STATUS returns nothing" while PING
+    # worked perfectly, which points at everything except the line limit.
+    def __init__(self, max_line_bytes=1024):
         self.max_line_bytes = max(1, int(max_line_bytes))
         self._buffer = bytearray()
 

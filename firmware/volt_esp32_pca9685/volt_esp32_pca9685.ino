@@ -84,6 +84,22 @@ const int PIN_I2C_SCL = 9;
 // 60 Hz control stream and shows up as a stuttering gait.
 const bool WIFI_DISABLE_SLEEP = true;
 
+// A client that stops sending is treated as gone after this long, and the
+// board drops it so a new host can connect.
+//
+// Without it, "one host only" becomes "one host ever": TCP does not notice a
+// peer that died without a FIN -- a crashed console, a yanked network, a
+// laptop that slept -- so voltClient.connected() stays true for minutes and
+// every reconnect is answered with ERR BUSY. Recovering meant power-cycling
+// the robot, which is not an acceptable answer to a GUI crash.
+//
+// Five seconds is far longer than the host's 60 Hz frame period and its
+// 10 s STATUS poll gap is covered by frames, so a live host is never
+// mistaken for a dead one. The servos are already safe long before this
+// fires: COMMAND_TIMEOUT_MS disarms at 750 ms.
+const uint32_t CLIENT_IDLE_TIMEOUT_MS = 5000;
+uint32_t lastClientByteMs = 0;
+
 WiFiServer voltServer(VOLT_TCP_PORT);
 WiFiClient voltClient;
 
@@ -103,17 +119,61 @@ class HostLink : public Stream {
   int peek() override {
     return voltClient && voltClient.connected() ? voltClient.peek() : -1;
   }
-  void flush() override {
-    if (voltClient && voltClient.connected()) voltClient.flush();
-  }
+
+  // Writes are BUFFERED to the end of the line. Print::print(F("...")) hands
+  // over one byte at a time, and with TCP_NODELAY set every one of those
+  // became its own packet -- a ~300 byte STATUS line turned into ~300 tiny
+  // segments, overran the LwIP send buffers, and the reply vanished. PING
+  // still worked because it is short, which is what made this look like a
+  // STATUS bug rather than a transport one.
+  //
+  // A UART coalesces naturally; this restores that. One line, one send.
   size_t write(uint8_t value) override {
     if (!voltClient || !voltClient.connected()) return 1;
-    return voltClient.write(value);
+    if (used_ >= sizeof(buffer_)) {
+      pushOut();
+    }
+    buffer_[used_++] = value;
+    if (value == '\n') {
+      pushOut();
+    }
+    return 1;
   }
-  size_t write(const uint8_t *buffer, size_t size) override {
+
+  size_t write(const uint8_t *data, size_t size) override {
     if (!voltClient || !voltClient.connected()) return size;
-    return voltClient.write(buffer, size);
+    for (size_t index = 0; index < size; ++index) {
+      write(data[index]);
+    }
+    return size;
   }
+
+  void flush() override {
+    pushOut();
+    if (voltClient && voltClient.connected()) voltClient.flush();
+  }
+
+ private:
+  void pushOut() {
+    if (used_ == 0) return;
+    if (voltClient && voltClient.connected()) {
+      // Short, bounded retry: a momentarily full socket should not silently
+      // truncate a status line, and must not block the servo loop either.
+      size_t sent = 0;
+      for (uint8_t attempt = 0; attempt < 4 && sent < used_; ++attempt) {
+        const size_t wrote = voltClient.write(buffer_ + sent, used_ - sent);
+        if (wrote == 0) {
+          delay(1);
+          continue;
+        }
+        sent += wrote;
+      }
+    }
+    used_ = 0;
+  }
+
+  uint8_t buffer_[512];
+  size_t used_ = 0;
 };
 
 HostLink Host;
@@ -259,7 +319,24 @@ const uint8_t BIN_FRAME_MAGIC = 0xA5;
 const uint8_t BIN_FRAME_BODY_LEN = 26;   // seq + 24 payload + crc
 // A binary frame stalled longer than this mid-body is a truncated stream,
 // not jitter: at 250000 baud the whole body takes ~1.1 ms.
-const uint32_t BIN_FRAME_STALL_US = 20000UL;
+// 250 ms here, against 20 ms on the UART build, and the difference is the
+// transport rather than a relaxed standard.
+//
+// On a UART a mid-frame gap means a byte was genuinely lost, and 27 bytes at
+// 250000 baud take about 1 ms, so 20 ms was already enormous. TCP does not
+// lose bytes mid-stream -- it either delivers them in order or the
+// connection dies -- so a gap here only means the segment boundary fell
+// inside a frame and the rest is still in flight.
+//
+// That happens constantly: this loop measured 27-48 ms worst case with the
+// face LEDs running, which is longer than the old 20 ms window all by
+// itself. Every frame split across two segments was therefore abandoned and
+// counted as a CRC failure, which is why a perfectly healthy link delivered
+// FRAMES_BIN=0 while the host reported zero drops.
+//
+// A stall that really does mean the link is gone is already handled, and
+// handled better, by COMMAND_TIMEOUT_MS disarming at 750 ms.
+const uint32_t BIN_FRAME_STALL_US = 250000UL;
 
 uint8_t binBuffer[BIN_FRAME_BODY_LEN];
 uint8_t binLength = 0;
@@ -1166,8 +1243,20 @@ void printStatus() {
   // host's status parser accepts any [A-Z_]+=value pair, so it reaches the
   // console without a protocol change. RSSI is read live rather than cached:
   // the robot moves, and so does the number.
+  // STATUS is space delimited and the host parses it with [A-Z_]+=([^\s]+),
+  // so a value containing a space is silently truncated at the first word.
+  // "NextGen Starlink 2.4GHz" arrived at the console as "NextGen". Spaces
+  // become underscores here; the console shows the substituted name, which
+  // is recognisable and, unlike the truncation, not a lie about which
+  // network is carrying the servo stream.
   Host.print(F(" WIFI_SSID="));
-  Host.print(wifiJoinedSsid[0] ? wifiJoinedSsid : "-");
+  if (wifiJoinedSsid[0] == '\0') {
+    Host.print('-');
+  } else {
+    for (const char *cursor = wifiJoinedSsid; *cursor != '\0'; ++cursor) {
+      Host.print(*cursor == ' ' ? '_' : *cursor);
+    }
+  }
   Host.print(F(" WIFI_RSSI="));
   Host.print(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
   Host.print(F(" WIFI_IP="));
@@ -1777,6 +1866,8 @@ void readSerialLines() {
   while (Host.available() > 0) {
     char c = (char)Host.read();
     lastSerialByteUs = micros();
+    // Evidence the host is alive, recorded where the byte is actually taken.
+    lastClientByteMs = millis();
     if (binActive) {
       binBuffer[binLength++] = (uint8_t)c;
       if (binLength >= BIN_FRAME_BODY_LEN) {
@@ -2017,11 +2108,27 @@ void serviceNetwork() {
     onHostDisconnected();
   }
 
+  // A peer that died without a FIN still looks connected, so silence is the
+  // only evidence available. The timer is refreshed in readSerialLines()
+  // where bytes are actually CONSUMED -- checking available() here instead
+  // was wrong, because it reports what is still unread, which drops to zero
+  // the moment the parser does its job. A host that had just sent a command
+  // was therefore declared silent five seconds later and disconnected
+  // mid-conversation.
+  if (voltClient && voltClient.connected()
+      && lastClientByteMs != 0
+      && millis() - lastClientByteMs > CLIENT_IDLE_TIMEOUT_MS) {
+    Serial.println(F("[volt] host silent; dropping it so a new one can connect"));
+    voltClient.stop();
+    onHostDisconnected();
+  }
+
   if (!voltClient || !voltClient.connected()) {
     WiFiClient incoming = voltServer.accept();
     if (incoming) {
       voltClient = incoming;
       voltClient.setNoDelay(true);
+      lastClientByteMs = millis();
       // A fresh host has not armed anything yet, and must not inherit the
       // previous session's arm state.
       onHostDisconnected();
@@ -2048,12 +2155,21 @@ void onHostDisconnected() {
   }
   servoArmed = false;
   timeoutWarned = false;
+  // Every parser buffer must be emptied, not just the binary one. A session
+  // that ended mid-frame or mid-line leaves bytes here, and on a UART that
+  // never mattered because the peer could not change without a board reset.
+  // On a socket it does: the next host's first command gets those leftovers
+  // prepended and comes back ERR UNKNOWN_COMMAND, which looks like a
+  // protocol mismatch rather than a stale buffer.
   binActive = false;
   binLength = 0;
   binHaveLastSeq = false;
+  lineLength = 0;
+  discardLineUntilNewline = false;
   hostPingSeen = false;
   hostSnapshotSeen = false;
   hostSynced = false;
+  lastClientByteMs = 0;
 }
 
 void setup() {
