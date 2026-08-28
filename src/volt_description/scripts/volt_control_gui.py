@@ -4733,10 +4733,23 @@ class VoltControlWindow(QMainWindow):
                 if function in signals:
                     signals[function] = -value if invert else value
             self.gamepad_axis_values = raw_axes
+            moved = (
+                abs(signals["drive_forward"] - self.forward) > 1e-3
+                or abs(signals["drive_horizontal"] - self.horizontal) > 1e-3
+            )
             self.joystick.set_vector(
                 signals["drive_forward"], signals["drive_horizontal"]
             )
             self.yaw_slider.setValue(int(signals["yaw_trim"] * 100.0))
+            if moved:
+                # Publish on the edge rather than waiting for the 50 ms
+                # command timer. The stick is sampled every 30 ms and was
+                # then published by a separate timer, so a flick could sit
+                # for up to 80 ms before it entered ROS -- longer than every
+                # transport stage after it put together. The timer stays as
+                # the keepalive the controller's command_timed_out watchdog
+                # needs.
+                self.publish_motion()
 
             for index in range(self.gamepad.get_numbuttons()):
                 pressed = bool(self.gamepad.get_button(index))

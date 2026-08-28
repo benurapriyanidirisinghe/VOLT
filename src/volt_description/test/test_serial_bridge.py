@@ -424,7 +424,9 @@ class SerialBridgeTests(unittest.TestCase):
         self.serial_factory.assert_not_called()
 
     def test_max_send_rate_is_enforced_without_sleeping(self):
-        self.assertEqual(self.bridge.max_send_rate, 60.0)
+        # 100.0 matches the controller's own tick; see
+        # test_a_100_hz_source_passes_through_without_aliasing.
+        self.assertEqual(self.bridge.max_send_rate, 100.0)
         self.bridge.dry_run = True
         self.bridge.hardware_enabled = True
         self.bridge.connect = Mock(
@@ -446,15 +448,32 @@ class SerialBridgeTests(unittest.TestCase):
         self.bridge.connect.assert_not_called()
         self.serial_factory.assert_not_called()
 
-    def test_ideal_100_hz_input_is_deadline_limited_to_60_not_50_hz(self):
+    def test_a_100_hz_source_passes_through_without_aliasing(self):
+        """Every controller sample goes out, evenly spaced.
+
+        At the old 60 Hz the deadline gate sampled a 100 Hz source and
+        aliased it into alternating 10 and 20 ms gaps: the right average
+        rate delivered unevenly, which is jitter the servos see. Matching
+        the rate to the source removes the gate rather than tuning it.
+        """
         self.bridge.dry_run = True
         self.bridge.hardware_enabled = True
         for index in range(100):
             self.set_time(20.0 + index * 0.01)
             self.bridge.command_callback(self.message([0.0] * 12))
 
-        self.assertEqual(self.bridge.frames_sent, 60)
+        self.assertEqual(self.bridge.frames_sent, 100)
         self.assertLessEqual(self.bridge.max_send_rate, 100.0)
+
+    def test_a_slower_rate_still_decimates(self):
+        """The gate must still work when deliberately set below the source."""
+        self.bridge.dry_run = True
+        self.bridge.hardware_enabled = True
+        self.bridge.max_send_rate = 50.0
+        for index in range(100):
+            self.set_time(20.0 + index * 0.01)
+            self.bridge.command_callback(self.message([0.0] * 12))
+        self.assertEqual(self.bridge.frames_sent, 50)
 
     def test_nonfinite_joint_commands_are_rejected_without_output(self):
         self.bridge.dry_run = True

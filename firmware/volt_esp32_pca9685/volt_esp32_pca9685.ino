@@ -110,14 +110,66 @@ WiFiClient voltClient;
 // backlog of replies for a host that has gone away.
 class HostLink : public Stream {
  public:
+  // Reads are BUFFERED, and this is the single most important thing in this
+  // class. readSerialLines() is written for a UART: it calls available()
+  // once per byte and reads one byte at a time, which on a UART is a
+  // register poke. On a socket every one of those calls entered the lwIP
+  // stack, so simply ASKING whether a byte was ready cost more than the byte
+  // was worth -- readSerialLines() measured 38 ms with NO data pending at
+  // all, and 47 ms under load, which by itself blew the 20 ms servo tick.
+  //
+  // It also corrupted the parser. Between available() saying yes and read()
+  // being called, the socket could come back empty; read() then returned -1,
+  // the caller cast it to (char) and got 0xFF, and that byte landed in the
+  // ASCII line buffer. With lineLength no longer zero, the 0xA5 frame magic
+  // stopped being recognised -- and since binary frames contain no newline,
+  // the line never terminated and the parser stayed wedged. That is why the
+  // board reported FRAMES_BIN=0 while the host sent hundreds of frames and
+  // dropped none.
+  //
+  // One bulk read per refill fixes both: cheap, and available() and read()
+  // can no longer disagree.
   int available() override {
-    return voltClient && voltClient.connected() ? voltClient.available() : 0;
+    if (rxPos_ < rxUsed_) {
+      return (int)(rxUsed_ - rxPos_);
+    }
+    refill();
+    return (int)(rxUsed_ - rxPos_);
   }
+
   int read() override {
-    return voltClient && voltClient.connected() ? voltClient.read() : -1;
+    if (rxPos_ >= rxUsed_) {
+      refill();
+      if (rxPos_ >= rxUsed_) {
+        return -1;
+      }
+    }
+    return rxBuffer_[rxPos_++];
   }
+
   int peek() override {
-    return voltClient && voltClient.connected() ? voltClient.peek() : -1;
+    if (rxPos_ >= rxUsed_) {
+      refill();
+      if (rxPos_ >= rxUsed_) {
+        return -1;
+      }
+    }
+    return rxBuffer_[rxPos_];
+  }
+
+  void resetInput() {
+    rxPos_ = 0;
+    rxUsed_ = 0;
+  }
+
+  // Discard, do NOT flush. Whatever is sitting here belongs to the host that
+  // just went away, and a partial line handed to the next one corrupts its
+  // first reply: a leftover "R" turned "OK PONG ..." into "ROK PONG ...",
+  // which fails the host's startswith("OK PONG") check. The handshake then
+  // never completes, so the console reports the board as unreachable while
+  // the board is in fact answering every command perfectly.
+  void resetOutput() {
+    used_ = 0;
   }
 
   // Writes are BUFFERED to the end of the line. Print::print(F("...")) hands
@@ -159,21 +211,40 @@ class HostLink : public Stream {
     if (voltClient && voltClient.connected()) {
       // Short, bounded retry: a momentarily full socket should not silently
       // truncate a status line, and must not block the servo loop either.
-      size_t sent = 0;
-      for (uint8_t attempt = 0; attempt < 4 && sent < used_; ++attempt) {
-        const size_t wrote = voltClient.write(buffer_ + sent, used_ - sent);
-        if (wrote == 0) {
-          delay(1);
-          continue;
-        }
-        sent += wrote;
-      }
+      // Single non-blocking attempt. The delay(1) retry this replaces put
+      // up to 4 ms of the control loop into waiting for a socket, which is
+      // the wrong trade: a status line is worth less than a servo tick, and
+      // the host polls STATUS again anyway.
+      voltClient.write(buffer_, used_);
     }
     used_ = 0;
   }
 
+  void refill() {
+    rxPos_ = 0;
+    rxUsed_ = 0;
+    if (!voltClient || !voltClient.connected()) {
+      return;
+    }
+    const int pending = voltClient.available();
+    if (pending <= 0) {
+      return;
+    }
+    const size_t want =
+      (size_t)pending > sizeof(rxBuffer_) ? sizeof(rxBuffer_) : (size_t)pending;
+    const int got = voltClient.read(rxBuffer_, want);
+    if (got > 0) {
+      rxUsed_ = (size_t)got;
+    }
+  }
+
   uint8_t buffer_[512];
   size_t used_ = 0;
+  // 1024 holds ~38 frames of backlog, far more than one 60 Hz tick, so a
+  // burst after a scheduling hiccup is drained in one or two refills.
+  uint8_t rxBuffer_[1024];
+  size_t rxPos_ = 0;
+  size_t rxUsed_ = 0;
 };
 
 HostLink Host;
@@ -306,7 +377,22 @@ const uint16_t PROTOCOL_VERSION = 3;
 // the real period at 250 Hz is ~2% off nominal and every pulse-width constant
 // effectively rescales.  Do not raise this without bench-verifying one leg
 // against a protractor at stand, min, and max angles first.
-const uint16_t SERVO_FREQ_HZ = 50;
+// 100 Hz, not 50. Two wins: the wait between latching a new OFF value and
+// the servo seeing a pulse edge halves (0-20 ms -> 0-10 ms), and output
+// quantisation halves with it (0.488 -> 0.244 deg per tick).
+//
+// 100 is the ONLY clean step up. The Adafruit driver computes
+// prescale = (uint8_t)((25e6/(f*4096)+0.5)-1); at 50 Hz that is 121 (real
+// period 19.988 ms) and at 100 Hz exactly 60 (9.994 ms) -- the same -0.06%
+// error, so every calibrated pulse width shifts by at most 0.24 deg, under
+// the tick the build already lives with.
+//
+// Do NOT go to 250 Hz. Prescale rounds to 23, a real period of 3.932 ms
+// against 4.0 assumed: -1.7%, which moves every commanded angle down by
+// 1.1-4.1 deg. Commanding ch2's guard value of 50.0 would then deliver
+// 48.1 deg, so the degree-domain clamp would stop bounding the physical
+// angle -- and ch2 is the channel that jammed a leg once already.
+const uint16_t SERVO_FREQ_HZ = 100;
 const uint16_t SERVO_PERIOD_US = 1000000UL / SERVO_FREQ_HZ;
 
 // ---- Binary FRAME path (PROTO 3) -----------------------------------------
@@ -349,11 +435,25 @@ uint32_t framesRxAscii = 0;
 uint32_t framesRxBin = 0;
 uint32_t binCrcFailCount = 0;
 uint32_t binSeqGapCount = 0;
-uint16_t maxLoopUs = 0;      // worst loop() duration since last STATUS
+uint32_t maxLoopUs = 0;      // worst loop() duration since last STATUS
+// uint32 deliberately: a uint16 saturates at 65535 us, and this loop was
+// measured pinned at exactly that -- which reports "65.5 ms" for anything
+// from 66 ms to a minute and hides the size of the problem.
+// Per-section worst case, so a slow loop names its own cause instead of
+// leaving the operator to guess between the radio, the servos and the LEDs.
+uint32_t maxNetUs = 0;       // serviceNetwork()
+uint32_t maxReadUs = 0;      // readSerialLines()
+uint32_t maxServoUs = 0;     // updateServos() incl. the I2C burst
+uint32_t maxFaceUs = 0;      // updateFaceLeds() incl. NeoPixel show()
 bool loopSampleSuppressed = false;  // set while a long reply is being printed
 uint16_t maxI2cUs = 0;       // worst servo I2C write burst since last STATUS
 uint32_t ledShowCount = 0;   // NeoPixel show() transmissions
 bool frameJustApplied = false;
+// Set when a frame lands, so the next updateServos() runs immediately
+// instead of waiting out the remainder of the free-running 20 ms tick.
+// That tick is not synchronised with frame arrival, so on average half a
+// period was being spent doing nothing with a target already in hand.
+bool servoTickDueNow = false;
 
 const uint16_t CHANNEL_MIN_US[CHANNEL_COUNT] = {
   600, 600, 600,
@@ -946,7 +1046,24 @@ void writeAllChannelsBurst() {
       pulseUsToTicks(angleToPulseUs(channel, currentDeg[channel]));
   }
   uint32_t startUs = micros();
-  for (uint8_t half = 0; half < 2; ++half) {
+  // ONE transaction, not two. The split exists because the AVR Wire buffer
+  // is 32 bytes and 12 channels need 50; the ESP32 core's I2C_BUFFER_LENGTH
+  // is 128, so the whole burst fits. Two transactions also latched the front
+  // legs 0.59 ms before the rear ones -- a skew the robot has no reason to
+  // carry.
+  {
+    const uint8_t first = 0;
+    Wire.beginTransmission(PCA9685_I2C_ADDRESS);
+    Wire.write((uint8_t)(PCA9685_LED0_ON_L + 4 * first));
+    for (uint8_t channel = 0; channel < CHANNEL_COUNT; ++channel) {
+      Wire.write((uint8_t)0x00);                    // ON low
+      Wire.write((uint8_t)0x00);                    // ON high
+      Wire.write((uint8_t)(ticks[channel] & 0xFF)); // OFF low
+      Wire.write((uint8_t)(ticks[channel] >> 8));   // OFF high
+    }
+    Wire.endTransmission();
+  }
+  for (uint8_t half = 0; half < 0; ++half) {
     uint8_t first = half * 6;
     Wire.beginTransmission(PCA9685_I2C_ADDRESS);
     Wire.write((uint8_t)(PCA9685_LED0_ON_L + 4 * first));
@@ -991,7 +1108,18 @@ void updateServos() {
   }
 
   uint32_t now = millis();
-  if (now - lastUpdateMs < UPDATE_PERIOD_MS) {
+  // The tick is free-running and unsynchronised with frame arrival, so a
+  // target that landed just after one tick used to sit unapplied for most
+  // of a period. When a frame has just been parsed, run now instead --
+  // dt still comes from the real elapsed time, so the slew limiter is
+  // unchanged and simply gets a smaller step.
+  if (!servoTickDueNow && now - lastUpdateMs < UPDATE_PERIOD_MS) {
+    return;
+  }
+  servoTickDueNow = false;
+  if (now == lastUpdateMs) {
+    // Two frames inside one millisecond: dt would be zero and maxStep with
+    // it, freezing the output. Wait for the clock to move.
     return;
   }
 
@@ -1265,8 +1393,20 @@ void printStatus() {
   } else {
     Host.print(F("-"));
   }
+  Host.print(F(" NET_MAX_US="));
+  Host.print(maxNetUs);
+  Host.print(F(" READ_MAX_US="));
+  Host.print(maxReadUs);
+  Host.print(F(" SERVO_MAX_US="));
+  Host.print(maxServoUs);
+  Host.print(F(" FACE_MAX_US="));
+  Host.print(maxFaceUs);
   maxLoopUs = 0;
   maxI2cUs = 0;
+  maxNetUs = 0;
+  maxReadUs = 0;
+  maxServoUs = 0;
+  maxFaceUs = 0;
   printFaceStatusFields();
   Host.println();
 }
@@ -2128,6 +2268,11 @@ void serviceNetwork() {
     if (incoming) {
       voltClient = incoming;
       voltClient.setNoDelay(true);
+      // Zero send timeout. NetworkClient::write() otherwise loops around a
+      // select() with a one-second timeout, so a momentarily full socket
+      // could stall loop() for seconds -- far past the 750 ms disarm, with
+      // the servos held at their last target the whole time.
+      voltClient.setTimeout(0);
       lastClientByteMs = millis();
       // A fresh host has not armed anything yet, and must not inherit the
       // previous session's arm state.
@@ -2166,6 +2311,8 @@ void onHostDisconnected() {
   binHaveLastSeq = false;
   lineLength = 0;
   discardLineUntilNewline = false;
+  Host.resetInput();
+  Host.resetOutput();
   hostPingSeen = false;
   hostSnapshotSeen = false;
   hostSynced = false;
@@ -2234,8 +2381,20 @@ void setup() {
 
 void loop() {
   uint32_t loopStartUs = micros();
+  uint32_t sectionUs = micros();
   serviceNetwork();
+  { uint32_t d = micros() - sectionUs; if (d > maxNetUs) maxNetUs = d; }
+  sectionUs = micros();
   readSerialLines();
+  {
+    uint32_t d = micros() - sectionUs;
+    // Exclude the pass that printed a long reply. readSerialLines() calls
+    // parseCommand(), which for STATUS writes ~500 bytes to the socket, and
+    // charging that to the frame-read path reported 38 ms for work that
+    // costs microseconds -- the same trap LOOP_MAX_US already dodges with
+    // loopSampleSuppressed.
+    if (!loopSampleSuppressed && d > maxReadUs) maxReadUs = d;
+  }
 
   if (
     servoArmed
@@ -2256,7 +2415,8 @@ void loop() {
   // bounded (12 channels at 400 kHz is ~1.4 ms) and the 64-byte RX ring buffers
   // 2.5 ms at 250000 baud, so a full frame cannot be lost behind it.
   if (lineLength == 0 && !discardLineUntilNewline) {
-    updateServos();
+    { uint32_t t = micros(); updateServos();
+      uint32_t d = micros() - t; if (d > maxServoUs) maxServoUs = d; }
     // Face policy differs by regime.  While a host FRAME stream exists, the
     // only deterministic quiet window is the one that just opened: the frame
     // was parsed and its I2C write is done, so the next frame is a full host
@@ -2266,7 +2426,8 @@ void loop() {
     if (serialIdleForFace()) {
       bool streaming = frameIntervalUs != 0;
       if (streaming ? frameJustApplied : faceWindowSafe()) {
-        updateFaceLeds();
+        { uint32_t t = micros(); updateFaceLeds();
+          uint32_t d = micros() - t; if (d > maxFaceUs) maxFaceUs = d; }
       }
     }
   }

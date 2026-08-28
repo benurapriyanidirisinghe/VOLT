@@ -175,7 +175,12 @@ class VoltSerialBridge(Node):
         # the face window ample room.  60 Hz also sits above the firmware's
         # 50 Hz interpolation tick, so every servo update has a target newer
         # than one pulse period instead of aliasing against a 30 Hz stream.
-        self.declare_parameter("max_send_rate", 60.0)
+        # 100.0, matching the controller's own 100 Hz tick. At 60 the gate
+        # sampled a 100 Hz source and aliased it into alternating 10 and
+        # 20 ms gaps -- 60 frames a second, but arriving unevenly, which is
+        # jitter the servos see and the operator feels. Every controller
+        # sample now goes out and the worst-case wait halves to 10 ms.
+        self.declare_parameter("max_send_rate", 100.0)
         # Gait tuning needs the rate the controller actually demands, measured
         # on hardware, rather than an estimate.  This records per-channel
         # deg/s BEFORE the send-rate gate, so it reports what the gait plans
@@ -443,6 +448,12 @@ class VoltSerialBridge(Node):
         )
         self.status_publisher = self.create_publisher(String, status_topic, 10)
         self.create_timer(0.05, self.timer_callback)
+        # The board's replies were only collected by the 20 Hz housekeeping
+        # timer, so every one of them -- PONG, OK ARM, OK STATUS, the ready
+        # banner -- waited 0-50 ms to be noticed, and the ARM handshake pays
+        # that on each of its several round trips. Draining the link is
+        # cheap; the expensive housekeeping stays on its own timer.
+        self.create_timer(0.005, self.read_available)
 
         mode = "dry-run" if self.dry_run or not self.hardware_enabled else "hardware"
         self.get_logger().info(
@@ -1457,10 +1468,24 @@ class VoltSerialBridge(Node):
         if self.serial_port is None:
             raise SerialException("serial port is not open")
         written = self.serial_port.write(payload)
-        if written != len(payload):
-            raise SerialException(
-                "short serial write: %d of %d bytes" % (written, len(payload))
-            )
+        if written == len(payload):
+            return
+        if written == 0 and self.link_is_network():
+            # NOT an error. volt_net_link drops a frame it cannot send
+            # immediately, on purpose: TCP would otherwise buffer through a
+            # stall and deliver a burst of stale servo targets afterwards.
+            # Raising here turned every one of those intended drops into a
+            # link teardown and reconnect -- hundreds of milliseconds, and a
+            # disarm, in response to a single busy moment. The frame is gone;
+            # the next one goes out fresh, and the sequence number makes the
+            # gap visible.
+            self.frames_rejected += 1
+            return
+        # A PARTIAL write is different and still fatal: half a frame on a
+        # byte stream desynchronises the parser at the far end.
+        raise SerialException(
+            "short serial write: %d of %d bytes" % (written, len(payload))
+        )
 
     def binary_frames_supported(self):
         return self.protocol.protocol_version >= BINARY_PROTOCOL_MIN_VERSION
@@ -1740,7 +1765,13 @@ class VoltSerialBridge(Node):
         # may spend tens of milliseconds printing one, so retain only the newest
         # cached target until its complete response arrives. Safety commands use
         # a separate callback and always bypass this cosmetic/query gate.
-        if self.serial_query_inflight:
+        if self.serial_query_inflight and not self.link_is_network():
+            # The gate exists for the Nano's 64-byte TX ring at 57600 baud
+            # (see the note above): a long STATUS reply could overrun it
+            # while frames were still going out. The ESP32 has 253 kB free
+            # and a 512-byte line buffer, so on a network link this would
+            # only stop the servo stream for the duration of a status poll
+            # for no reason at all.
             return
         if self.send_frame_payload(frame):
             self.frames_sent += 1

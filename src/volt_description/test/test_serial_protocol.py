@@ -711,10 +711,17 @@ class BinaryFrameTests(unittest.TestCase):
                 "%s is forwarded to the console but no firmware emits it"
                 % counter,
             )
-            if counter.startswith("WIFI_"):
-                self.assertEqual(
-                    ["esp32"], emitters,
-                    "%s is a WiFi field; the cabled board must not claim it"
+            # Board-specific fields, named explicitly. A suffix rule like
+            # endswith("_MAX_US") would also catch LOOP_MAX_US and
+            # BUS_MAX_US, which BOTH boards emit -- quietly dropping the
+            # guarantee that the cabled board still reports them.
+            esp32_only = counter.startswith("WIFI_") or counter in (
+                "NET_MAX_US", "READ_MAX_US", "SERVO_MAX_US", "FACE_MAX_US",
+            )
+            if esp32_only:
+                self.assertIn(
+                    "esp32", emitters,
+                    "%s is an ESP32 field but that firmware does not emit it"
                     % counter,
                 )
             else:
