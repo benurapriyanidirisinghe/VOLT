@@ -421,3 +421,127 @@ class DiagramTests(unittest.TestCase):
         ][:600]
         self.assertIn("for name, x, y, radius, _glyph, _side, _row in PAD_CONTROLS", control_at)
         self.assertIn("self._point(x, y)", control_at)
+
+
+class AxisBindingTests(unittest.TestCase):
+    """Sticks drive signals, and which axis drives which is an edit."""
+
+    def setUp(self):
+        import tempfile
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "gamepad_bindings.yaml"
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_defaults_reproduce_the_old_hardcoded_mapping(self):
+        """The replaced code read set_vector(-left_y, left_x) and -right_x."""
+        axes = bindings.DEFAULT_AXIS_BINDINGS
+        self.assertEqual(
+            {"function": "drive_horizontal", "invert": False}, axes["axis_0"]
+        )
+        self.assertEqual(
+            {"function": "drive_forward", "invert": True}, axes["axis_1"]
+        )
+        self.assertEqual(
+            {"function": "yaw_trim", "invert": True}, axes["axis_2"]
+        )
+
+    def test_two_axes_cannot_drive_one_signal(self):
+        candidate = bindings._copy_axes(bindings.DEFAULT_AXIS_BINDINGS)
+        candidate["axis_3"] = {"function": "drive_forward", "invert": False}
+        with self.assertRaises(BindingError) as caught:
+            bindings.validate_axis_bindings(candidate)
+        self.assertIn("more than one axis", str(caught.exception))
+
+    def test_unknown_axis_and_function_are_rejected(self):
+        for broken in (
+            {"axis_99": {"function": "", "invert": False}},
+            {"axis_0": {"function": "fly", "invert": False}},
+            {"axis_0": {"function": "", "invert": "yes"}},
+            {"axis_0": {"function": "", "spin": 1}},
+        ):
+            with self.assertRaises(BindingError):
+                bindings.validate_axis_bindings(broken)
+
+    def test_resolve_axis_returns_function_and_invert(self):
+        self.assertEqual(
+            ("drive_forward", True),
+            bindings.resolve_axis(bindings.DEFAULT_AXIS_BINDINGS, 1),
+        )
+        self.assertEqual(
+            ("", False),
+            bindings.resolve_axis(bindings.DEFAULT_AXIS_BINDINGS, 99),
+        )
+
+    def test_axes_round_trip_with_the_buttons(self):
+        axes = bindings._copy_axes(bindings.DEFAULT_AXIS_BINDINGS)
+        axes["axis_2"] = {"function": "", "invert": False}
+        axes["axis_3"] = {"function": "yaw_trim", "invert": True}
+        save_bindings(DEFAULT_BINDINGS, self.path, axis_bindings=axes)
+        loaded, error = bindings.load_axis_bindings(self.path)
+        self.assertEqual("", error)
+        self.assertEqual(
+            {"function": "yaw_trim", "invert": True}, loaded["axis_3"]
+        )
+        buttons, button_error = load_bindings(self.path)
+        self.assertEqual("", button_error)
+        self.assertEqual("stop", buttons["button_2"])
+
+    def test_a_file_written_before_axes_existed_is_not_an_error(self):
+        self.path.write_text(
+            yaml.safe_dump({"version": 1, "bindings": dict(DEFAULT_BINDINGS)})
+        )
+        loaded, error = bindings.load_axis_bindings(self.path)
+        self.assertEqual("", error)
+        self.assertEqual("drive_forward", loaded["axis_1"]["function"])
+
+    def test_malformed_axes_section_reports_and_falls_back(self):
+        self.path.write_text("bindings: {}\naxes: [not a mapping]\n")
+        loaded, error = bindings.load_axis_bindings(self.path)
+        self.assertTrue(error)
+        self.assertEqual("drive_forward", loaded["axis_1"]["function"])
+
+    def test_unsafe_axis_set_is_refused_on_save(self):
+        axes = bindings._copy_axes(bindings.DEFAULT_AXIS_BINDINGS)
+        axes["axis_3"] = {"function": "yaw_trim", "invert": False}
+        with self.assertRaises(BindingError):
+            save_bindings(DEFAULT_BINDINGS, self.path, axis_bindings=axes)
+        self.assertFalse(self.path.exists())
+
+
+class AxisConsoleTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "volt_control_gui.py"
+        ).read_text()
+
+    def test_no_hardcoded_axis_indices_remain(self):
+        for token in ("AXIS_LEFT_X", "AXIS_LEFT_Y", "AXIS_RIGHT_X"):
+            self.assertNotIn(token, self.source)
+
+    def test_poll_drives_signals_through_the_bindings(self):
+        self.assertIn("resolve_axis(self.gamepad_axis_bindings, index)", self.source)
+        self.assertIn('signals["drive_forward"], signals["drive_horizontal"]', self.source)
+        self.assertIn('signals["yaw_trim"]', self.source)
+
+    def test_rebinding_an_axis_latches_motion_until_neutral(self):
+        """A stick that changed meaning must not inherit a held deflection."""
+        changed = self.source[
+            self.source.index("def gamepad_axis_changed"):
+        ][:2200]
+        self.assertIn("self.latch_motion_until_neutral()", changed)
+
+    def test_rejected_axis_edit_reverts_the_controls(self):
+        changed = self.source[
+            self.source.index("def gamepad_axis_changed"):
+        ][:2200]
+        self.assertIn("except BindingError as exc:", changed)
+        self.assertIn("self.refresh_gamepad_axis_controls()", changed)
+
+    def test_diagram_shows_live_stick_deflection(self):
+        self.assertIn("def set_axes(self, values, axis_bindings=None)", self.source)
+        self.assertIn("PAD_STICK_AXES = ((0, 1), (2, 3))", self.source)
+        self.assertIn("PAD_AXIS_TOKENS", self.source)

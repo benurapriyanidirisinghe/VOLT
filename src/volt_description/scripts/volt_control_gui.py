@@ -46,6 +46,7 @@ from std_msgs.msg import ColorRGBA, Float64, String, UInt8, UInt32
 from volt_gait_controller import GAITS, clamp
 from volt_gamepad_bindings import (
     ACTION_CAPTIONS,
+    MAX_AXES,
     BINDABLE_ACTIONS,
     BindingError,
     DEFAULT_BINDINGS,
@@ -53,9 +54,18 @@ from volt_gamepad_bindings import (
     all_input_names,
     bindings_path,
     button_input,
+    AXIS_FUNCTIONS,
+    AXIS_FUNCTION_CAPTIONS,
+    DEFAULT_AXIS_BINDINGS,
+    all_axis_names,
+    axis_caption,
+    axis_input,
     input_caption,
+    load_axis_bindings,
     load_bindings,
     reachable_stop_inputs,
+    resolve_axis,
+    validate_axis_bindings,
     resolve,
     save_bindings,
 )
@@ -257,9 +267,20 @@ BALANCE_SENSITIVE_EMOTES = {
 # from the GAMEPAD tab. DEFAULT_BINDINGS there reproduces the map that used
 # to be hard-coded here.
 
-AXIS_LEFT_X = 0
-AXIS_LEFT_Y = 1
-AXIS_RIGHT_X = 2
+# Physical stick pairs, for DRAWING the sticks on the binding diagram. Which
+# signal an axis drives is a binding now (volt_gamepad_bindings.AXIS_*); this
+# is only the hardware convention that axes 0/1 are the left stick and 2/3
+# the right, so the diagram can show real deflection.
+PAD_STICK_AXES = ((0, 1), (2, 3))
+
+# Short tokens for the stick callouts. The full captions ("Drive forward /
+# back") overflow the label gutter and get clipped; the axis editor under
+# the diagram carries the long form.
+PAD_AXIS_TOKENS = {
+    "drive_forward": "fwd",
+    "drive_horizontal": "steer",
+    "yaw_trim": "trim",
+}
 GAMEPAD_DEADZONE = 0.10
 GAMEPAD_DEADZONE_RELEASE = 0.07
 
@@ -505,6 +526,8 @@ class GamepadDiagram(QWidget):
         self.pressed = set()
         self.selected = ""
         self.hovered = ""
+        self.axes = []
+        self.axis_bindings = {}
 
     # -- state ---------------------------------------------------------
     def set_bindings(self, bindings):
@@ -521,6 +544,23 @@ class GamepadDiagram(QWidget):
         if name != self.selected:
             self.selected = name
             self.update()
+
+    def set_axes(self, values, axis_bindings=None):
+        """Live stick deflection, so the sticks read as sticks."""
+        values = list(values or [])
+        if axis_bindings is not None:
+            self.axis_bindings = dict(axis_bindings)
+        if values != self.axes:
+            self.axes = values
+            self.update()
+
+    def _axis(self, index):
+        if 0 <= index < len(self.axes):
+            try:
+                return max(-1.0, min(1.0, float(self.axes[index])))
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
 
     # -- geometry ------------------------------------------------------
     def _scale(self):
@@ -616,6 +656,25 @@ class GamepadDiagram(QWidget):
             6.0 * factor, 6.0 * factor,
         )
 
+        # Stick wells. The L3/R3 circles below are drawn on top and become
+        # the moving cap, so the sticks read as sticks rather than as two
+        # more buttons -- and the operator can see the deflection the
+        # console is actually receiving.
+        for (centre_x, centre_y), (ax_x, ax_y) in zip(
+            ((700, 410), (900, 410)), PAD_STICK_AXES
+        ):
+            well = self._point(centre_x, centre_y)
+            well_r = 62.0 * factor
+            painter.setPen(QPen(QColor("#39465a"), max(1.2, 1.8 * factor)))
+            painter.setBrush(QBrush(QColor("#0f151d")))
+            painter.drawEllipse(well, well_r, well_r)
+            deflect_x = self._axis(ax_x) * 22.0
+            deflect_y = self._axis(ax_y) * 22.0
+            if abs(deflect_x) > 0.5 or abs(deflect_y) > 0.5:
+                tip = self._point(centre_x + deflect_x, centre_y + deflect_y)
+                painter.setPen(QPen(QColor("#7dd3fc"), max(1.2, 2.0 * factor)))
+                painter.drawLine(well, tip)
+
         label_font = QFont(self.font())
         label_font.setPointSizeF(max(7.0, 8.6 * factor * 1.6))
         glyph_font = QFont(self.font())
@@ -626,6 +685,12 @@ class GamepadDiagram(QWidget):
         rows_right = sum(1 for c in PAD_CONTROLS if c[5] == "right")
 
         for name, x, y, radius, glyph, side, row in PAD_CONTROLS:
+            if name == "button_8":
+                x += self._axis(PAD_STICK_AXES[0][0]) * 22.0
+                y += self._axis(PAD_STICK_AXES[0][1]) * 22.0
+            elif name == "button_9":
+                x += self._axis(PAD_STICK_AXES[1][0]) * 22.0
+                y += self._axis(PAD_STICK_AXES[1][1]) * 22.0
             centre = self._point(x, y)
             r = max(7.0, radius * factor)
             action = self.bindings.get(name, "")
@@ -681,6 +746,18 @@ class GamepadDiagram(QWidget):
             if not action:
                 caption = "unbound"
             text = "%s  %s" % (input_caption(name), caption)
+            if name in ("button_8", "button_9"):
+                pair = PAD_STICK_AXES[0 if name == "button_8" else 1]
+                driven = [
+                    PAD_AXIS_TOKENS.get(
+                        (self.axis_bindings.get(axis_input(i)) or {}).get(
+                            "function", ""
+                        ), ""
+                    )
+                    for i in pair
+                ]
+                driven = [token for token in dict.fromkeys(driven) if token]
+                text += "  \u2b0d %s" % ("+".join(driven) if driven else "-")
             painter.setPen(QPen(
                 QColor("#bbf7d0") if is_pressed
                 else QColor("#7dd3fc") if is_selected
@@ -1040,6 +1117,10 @@ class VoltControlWindow(QMainWindow):
         # Operator-editable gamepad map. Loaded before any widget is built
         # because build_gamepad_tab() reads it.
         self.gamepad_bindings, self.gamepad_binding_load_error = load_bindings()
+        self.gamepad_axis_bindings, axis_error = load_axis_bindings()
+        self.gamepad_axis_values = []
+        if axis_error and not self.gamepad_binding_load_error:
+            self.gamepad_binding_load_error = axis_error
         self.gait_limits = dict(GAIT_LIMITS)
         # Hardware-effective limits (max_x * hardware_speed_scale). The GUI
         # scales the speed slider by THESE, not by the raw command limits:
@@ -2220,6 +2301,54 @@ class VoltControlWindow(QMainWindow):
             self.gamepad_binding_labels[name] = live
         layout.addWidget(group)
 
+        axis_group = QGroupBox("Sticks and triggers (axes)")
+        axis_grid = QGridLayout(axis_group)
+        axis_grid.setHorizontalSpacing(10)
+        axis_grid.setVerticalSpacing(4)
+        axis_hint = QLabel(
+            "A stick drives a signal rather than firing an action. Invert "
+            "flips the sign: most pads report stick-up as negative, which is "
+            "what the old fixed mapping was quietly compensating for. Each "
+            "signal takes exactly one axis."
+        )
+        axis_hint.setWordWrap(True)
+        axis_hint.setObjectName("gaitDetail")
+        axis_grid.addWidget(axis_hint, 0, 0, 1, 4)
+        for column, title in enumerate(("Axis", "Drives", "", "Live")):
+            caption = QLabel(title)
+            caption.setObjectName("poseCaption")
+            axis_grid.addWidget(caption, 1, column)
+
+        self.gamepad_axis_combos = {}
+        self.gamepad_axis_inverts = {}
+        self.gamepad_axis_meters = {}
+        for index, name in enumerate(all_axis_names()):
+            row = 2 + index
+            caption = QLabel(axis_caption(name))
+            caption.setObjectName("gaitDetail")
+            combo = self._NoWheelComboBox()
+            for function, function_caption in AXIS_FUNCTIONS:
+                combo.addItem(function_caption, function)
+            combo.currentIndexChanged.connect(
+                lambda _i, key=name: self.gamepad_axis_changed(key)
+            )
+            invert = QCheckBox("invert")
+            invert.stateChanged.connect(
+                lambda _s, key=name: self.gamepad_axis_changed(key)
+            )
+            meter = QLabel("0.00")
+            meter.setObjectName("gaitDetail")
+            meter.setFixedWidth(52)
+            axis_grid.addWidget(caption, row, 0)
+            axis_grid.addWidget(combo, row, 1)
+            axis_grid.addWidget(invert, row, 2)
+            axis_grid.addWidget(meter, row, 3)
+            self.gamepad_axis_combos[name] = combo
+            self.gamepad_axis_inverts[name] = invert
+            self.gamepad_axis_meters[name] = meter
+        axis_grid.setColumnStretch(1, 1)
+        layout.addWidget(axis_group)
+
         buttons = QHBoxLayout()
         self.gamepad_save_button = QPushButton("SAVE BINDINGS")
         self.gamepad_save_button.clicked.connect(self.save_gamepad_bindings)
@@ -2245,6 +2374,7 @@ class VoltControlWindow(QMainWindow):
         layout.addStretch(1)
 
         self.gamepad_selected_input = ""
+        self.refresh_gamepad_axis_controls()
         self.refresh_gamepad_binding_controls()
         if self.gamepad_binding_load_error:
             self.set_gamepad_binding_status(
@@ -2286,6 +2416,63 @@ class VoltControlWindow(QMainWindow):
             % (input_caption(name), ACTION_CAPTIONS.get(action, "unbound")),
             "#7dd3fc",
         )
+
+    def gamepad_axis_changed(self, name):
+        """Apply an axis edit, refusing a set where two axes fight."""
+        combos = getattr(self, "gamepad_axis_combos", None)
+        if not combos or name not in combos:
+            return
+        candidate = {
+            key: {
+                "function": combos[key].currentData() or "",
+                "invert": self.gamepad_axis_inverts[key].isChecked(),
+            }
+            for key in combos
+        }
+        try:
+            self.gamepad_axis_bindings = validate_axis_bindings(candidate)
+        except BindingError as exc:
+            # Put the controls back to the last good set rather than leaving
+            # the console holding a mapping it will not act on.
+            self.refresh_gamepad_axis_controls()
+            self.set_gamepad_binding_status("Not applied: %s" % exc, "#fca5a5")
+            return
+        # A stick that just changed meaning must not inherit a held
+        # deflection: require a fresh neutral before it can drive again.
+        self.latch_motion_until_neutral()
+        self.gamepad_diagram.set_axes(
+            self.gamepad_axis_values, self.gamepad_axis_bindings
+        )
+        function = self.gamepad_axis_bindings[name]["function"]
+        self.set_gamepad_binding_status(
+            "%s -> %s%s (unsaved; centre the sticks to resume)"
+            % (
+                axis_caption(name),
+                AXIS_FUNCTION_CAPTIONS.get(function, "unused"),
+                " inverted" if self.gamepad_axis_bindings[name]["invert"] else "",
+            ),
+            "#7dd3fc",
+        )
+
+    def refresh_gamepad_axis_controls(self):
+        combos = getattr(self, "gamepad_axis_combos", None)
+        if not combos:
+            return
+        for name, combo in combos.items():
+            entry = self.gamepad_axis_bindings.get(name) or {}
+            position = combo.findData(entry.get("function", ""))
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, position))
+            combo.blockSignals(blocked)
+            invert = self.gamepad_axis_inverts[name]
+            blocked = invert.blockSignals(True)
+            invert.setChecked(bool(entry.get("invert", False)))
+            invert.blockSignals(blocked)
+        diagram = getattr(self, "gamepad_diagram", None)
+        if diagram is not None:
+            diagram.set_axes(
+                self.gamepad_axis_values, self.gamepad_axis_bindings
+            )
 
     def set_gamepad_binding_status(self, text, color="#94a3b8"):
         self.gamepad_binding_status.setText(str(text))
@@ -2357,7 +2544,9 @@ class VoltControlWindow(QMainWindow):
 
     def save_gamepad_bindings(self):
         try:
-            target = save_bindings(self.gamepad_bindings)
+            target = save_bindings(
+                self.gamepad_bindings, axis_bindings=self.gamepad_axis_bindings
+            )
         except BindingError as exc:
             self.set_gamepad_binding_status("Not saved: %s" % exc, "#fca5a5")
             return
@@ -2374,7 +2563,10 @@ class VoltControlWindow(QMainWindow):
 
     def reload_gamepad_bindings(self):
         self.gamepad_bindings, error = load_bindings()
+        self.gamepad_axis_bindings, axis_error = load_axis_bindings()
+        error = error or axis_error
         self.gamepad_binding_load_error = error
+        self.refresh_gamepad_axis_controls()
         self.refresh_gamepad_binding_controls()
         self.set_gamepad_binding_status(
             error or "Reloaded from %s" % bindings_path(),
@@ -2383,6 +2575,10 @@ class VoltControlWindow(QMainWindow):
 
     def restore_default_gamepad_bindings(self):
         self.gamepad_bindings = dict(DEFAULT_BINDINGS)
+        self.gamepad_axis_bindings = {
+            key: dict(value) for key, value in DEFAULT_AXIS_BINDINGS.items()
+        }
+        self.refresh_gamepad_axis_controls()
         self.refresh_gamepad_binding_controls()
         self.set_gamepad_binding_status(
             "Defaults restored (unsaved).", "#7dd3fc"
@@ -2414,6 +2610,23 @@ class VoltControlWindow(QMainWindow):
         diagram = getattr(self, "gamepad_diagram", None)
         if diagram is not None:
             diagram.set_pressed(pressed)
+            diagram.set_axes(
+                self.gamepad_axis_values, self.gamepad_axis_bindings
+            )
+        meters = getattr(self, "gamepad_axis_meters", None)
+        if meters:
+            for index, name in enumerate(all_axis_names()):
+                meter = meters.get(name)
+                if meter is None:
+                    continue
+                value = (
+                    self.gamepad_axis_values[index]
+                    if index < len(self.gamepad_axis_values) else 0.0
+                )
+                meter.setText("%+.2f" % value)
+                meter.setStyleSheet(
+                    "color: #86efac;" if abs(value) > 0.05 else "color: #64748b;"
+                )
 
     def make_spinbox(self, minimum, maximum, value, step, decimals):
         box = QDoubleSpinBox()
@@ -4478,11 +4691,26 @@ class VoltControlWindow(QMainWindow):
                     self.gamepad_buttons[key] = pressed
                 return
 
-            left_x = self.axis_value(AXIS_LEFT_X)
-            left_y = self.axis_value(AXIS_LEFT_Y)
-            right_x = self.axis_value(AXIS_RIGHT_X)
-            self.joystick.set_vector(-left_y, left_x)
-            self.yaw_slider.setValue(int(-right_x * 100.0))
+            # Sticks drive SIGNALS, and which axis drives which signal is
+            # an operator binding rather than a hard-coded index. invert is
+            # part of the binding because the sign convention belongs to the
+            # pad: most report stick-up as negative, which is what the old
+            # fixed `-left_y` was quietly compensating for.
+            signals = {"drive_forward": 0.0, "drive_horizontal": 0.0,
+                       "yaw_trim": 0.0}
+            axis_count = self.gamepad.get_numaxes()
+            raw_axes = []
+            for index in range(min(axis_count, MAX_AXES)):
+                value = self.axis_value(index)
+                raw_axes.append(value)
+                function, invert = resolve_axis(self.gamepad_axis_bindings, index)
+                if function in signals:
+                    signals[function] = -value if invert else value
+            self.gamepad_axis_values = raw_axes
+            self.joystick.set_vector(
+                signals["drive_forward"], signals["drive_horizontal"]
+            )
+            self.yaw_slider.setValue(int(signals["yaw_trim"] * 100.0))
 
             for index in range(self.gamepad.get_numbuttons()):
                 pressed = bool(self.gamepad.get_button(index))

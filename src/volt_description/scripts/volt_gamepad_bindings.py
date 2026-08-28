@@ -101,6 +101,113 @@ ACTION_CAPTIONS = {
 MAX_BUTTONS = 20
 HAT_INPUTS = ("hat_left", "hat_right", "hat_up", "hat_down")
 
+# --------------------------------------------------------------------------
+# Axes (the sticks)
+# --------------------------------------------------------------------------
+#
+# A stick is continuous, so it cannot be bound to an action the way a button
+# is -- it drives a signal. These are the signals the console has:
+#
+#   drive_forward     the forward/back component of the drive vector
+#   drive_horizontal  steer in Normal mode, strafe in Crab mode -- the drive
+#                     mode decides which, exactly as the on-screen joystick
+#                     already behaves
+#   yaw_trim          the additive heading bias
+#
+# invert exists because the sign convention is a property of the pad, not of
+# the robot: most pads report stick-up as NEGATIVE, which is why the
+# hard-coded version this replaces read `set_vector(-left_y, left_x)`.
+AXIS_FUNCTIONS = (
+    ("", "— unused —"),
+    ("drive_forward", "Drive forward / back"),
+    ("drive_horizontal", "Steer / strafe"),
+    ("yaw_trim", "Yaw trim"),
+)
+AXIS_FUNCTION_IDS = tuple(name for name, _caption in AXIS_FUNCTIONS)
+AXIS_FUNCTION_CAPTIONS = dict(AXIS_FUNCTIONS)
+
+# Each signal may be driven by at most one axis; two axes fighting over
+# drive_forward is a bug the operator would feel as a stick that half works.
+EXCLUSIVE_AXIS_FUNCTIONS = tuple(
+    name for name in AXIS_FUNCTION_IDS if name
+)
+
+MAX_AXES = 8
+
+
+def axis_input(index):
+    return "axis_%d" % int(index)
+
+
+def axis_caption(name):
+    if str(name).startswith("axis_"):
+        return "Axis %s" % str(name).split("_")[1]
+    return str(name)
+
+
+def all_axis_names(axis_count=MAX_AXES):
+    count = max(0, min(int(axis_count), MAX_AXES))
+    return tuple(axis_input(i) for i in range(count))
+
+
+# Reproduces the hard-coded behaviour this replaces exactly:
+#   left_x -> horizontal, -left_y -> forward, -right_x -> yaw trim
+DEFAULT_AXIS_BINDINGS = {
+    "axis_0": {"function": "drive_horizontal", "invert": False},
+    "axis_1": {"function": "drive_forward", "invert": True},
+    "axis_2": {"function": "yaw_trim", "invert": True},
+    "axis_3": {"function": "", "invert": False},
+    "axis_4": {"function": "", "invert": False},
+    "axis_5": {"function": "", "invert": False},
+    "axis_6": {"function": "", "invert": False},
+    "axis_7": {"function": "", "invert": False},
+}
+
+
+def validate_axis_bindings(raw):
+    """Return a clean axis mapping, or raise BindingError."""
+    if not isinstance(raw, dict):
+        raise BindingError("axis bindings must be a mapping")
+    valid = set(all_axis_names())
+    result = {}
+    for name, entry in raw.items():
+        key = str(name).strip()
+        if key not in valid:
+            raise BindingError("unknown axis '%s'" % key)
+        if not isinstance(entry, dict):
+            raise BindingError("%s must be a mapping" % key)
+        unknown = sorted(set(entry) - {"function", "invert"})
+        if unknown:
+            raise BindingError("%s has unknown keys: %s" % (key, unknown))
+        function = str(entry.get("function", "") or "").strip()
+        if function not in AXIS_FUNCTION_IDS:
+            raise BindingError(
+                "unknown axis function '%s' on %s" % (function, key)
+            )
+        invert = entry.get("invert", False)
+        if not isinstance(invert, bool):
+            raise BindingError("%s invert must be true or false" % key)
+        result[key] = {"function": function, "invert": invert}
+    for function in EXCLUSIVE_AXIS_FUNCTIONS:
+        owners = sorted(
+            key for key, entry in result.items()
+            if entry["function"] == function
+        )
+        if len(owners) > 1:
+            raise BindingError(
+                "%s is driven by more than one axis (%s); each signal takes "
+                "exactly one" % (function, ", ".join(owners))
+            )
+    return result
+
+
+def resolve_axis(axis_bindings, index):
+    """Return (function, invert) for a physical axis index."""
+    entry = axis_bindings.get(axis_input(index))
+    if not isinstance(entry, dict):
+        return "", False
+    return entry.get("function", ""), bool(entry.get("invert", False))
+
 
 def button_input(index):
     return "button_%d" % int(index)
@@ -179,7 +286,7 @@ def bindings_path():
 
 
 def load_bindings(path=None):
-    """Load the operator's bindings, falling back to the defaults.
+    """Load the operator's button bindings, falling back to the defaults.
 
     A corrupt or unsafe file must not leave the console with no STOP button,
     so this reports the problem and returns the defaults rather than raising
@@ -211,15 +318,76 @@ def load_bindings(path=None):
         return dict(DEFAULT_BINDINGS), "%s rejected: %s" % (target, exc)
 
 
-def save_bindings(bindings, path=None):
-    """Validate and persist atomically. Returns the path written."""
+def load_axis_bindings(path=None):
+    """Load the operator's axis mapping, falling back to the defaults.
+
+    Same contract as load_bindings: a broken file reports and falls back
+    rather than raising into GUI construction. A console that will not open
+    is worse than one running default sticks.
+    """
+    target = Path(path or bindings_path()).expanduser()
+    if not target.is_file():
+        return _copy_axes(DEFAULT_AXIS_BINDINGS), ""
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return (
+            _copy_axes(DEFAULT_AXIS_BINDINGS),
+            "Could not read %s: %s" % (target, exc),
+        )
+    if not isinstance(raw, dict):
+        return _copy_axes(DEFAULT_AXIS_BINDINGS), "%s is not a mapping" % target
+    stored = raw.get("axes")
+    if stored is None:
+        # A file written before axes were bindable is not an error.
+        return _copy_axes(DEFAULT_AXIS_BINDINGS), ""
+    if not isinstance(stored, dict):
+        return (
+            _copy_axes(DEFAULT_AXIS_BINDINGS),
+            "%s has a malformed 'axes' section (expected a mapping)" % target,
+        )
+    merged = _copy_axes(DEFAULT_AXIS_BINDINGS)
+    for key, entry in stored.items():
+        if isinstance(entry, dict):
+            merged[str(key)] = dict(entry)
+        else:
+            merged[str(key)] = entry
+    try:
+        return validate_axis_bindings(merged), ""
+    except BindingError as exc:
+        return (
+            _copy_axes(DEFAULT_AXIS_BINDINGS),
+            "%s axes rejected: %s" % (target, exc),
+        )
+
+
+def _copy_axes(axes):
+    return {key: dict(value) for key, value in axes.items()}
+
+
+def save_bindings(bindings, path=None, axis_bindings=None):
+    """Validate and persist atomically. Returns the path written.
+
+    Both sections are written together: they describe one controller, and
+    writing only half would leave the file self-inconsistent after an edit.
+    """
     validated = validate_bindings(bindings)
+    validated_axes = validate_axis_bindings(
+        _copy_axes(DEFAULT_AXIS_BINDINGS) if axis_bindings is None
+        else axis_bindings
+    )
     target = Path(path or bindings_path()).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(
-            {"version": 1, "bindings": validated}, handle, sort_keys=True
+            {
+                "version": 1,
+                "bindings": validated,
+                "axes": validated_axes,
+            },
+            handle,
+            sort_keys=True,
         )
     temporary.replace(target)
     return target
