@@ -14,6 +14,7 @@ from std_msgs.msg import ColorRGBA, Float64MultiArray, String, UInt8, UInt32
 from volt_kinematics import JOINT_NAMES
 from volt_servo_calibration import (
     CalibrationError,
+    deadband_feedforward,
     ServoCalibrationTable,
     named_positions_from_ordered,
 )
@@ -28,6 +29,7 @@ from volt_serial_protocol import (
     format_binary_frame,
     BINARY_PROTOCOL_MIN_VERSION,
     FIRMWARE_COUNTER_FIELDS,
+    firmware_guard_clips,
     format_led_color_b_command,
     format_led_brightness_command,
     format_led_color_command,
@@ -353,6 +355,13 @@ class VoltSerialBridge(Node):
         self.frames_sent = 0
         self.frames_rejected = 0
         self.frames_blocked = 0
+        # The firmware clamps to CHANNEL_MIN_DEG/CHANNEL_MAX_DEG and reports
+        # nothing back, so the host mirrors the guard to make a clip visible
+        # instead of silently losing commanded travel.
+        self.guard_clip_channels = {}
+        self.guard_clip_frames = 0
+        self.guard_clip_last_log = 0.0
+        self.guard_clip_last_seen = 0.0
         self.frame_rate = 0.0
         self.frame_rate_window_start = self.now_seconds()
         self.frame_rate_window_sent = 0
@@ -1660,7 +1669,9 @@ class VoltSerialBridge(Node):
             return
 
         now = self.now_seconds()
+        frame = self.apply_deadband_feedforward(frame)
         self.record_joint_rate(frame, now)
+        self.note_firmware_guard_clips(frame, now)
         if not self.frame_send_slot_available(now):
             return
 
@@ -1863,6 +1874,75 @@ class VoltSerialBridge(Node):
                     self.service_face_queue(now)
         self.publish_status()
 
+    def apply_deadband_feedforward(self, frame):
+        """Bias each channel past its static-friction deadband.
+
+        Applied at the last stage that still knows the commanded step and
+        its direction, and before the guard check so what gets reported as
+        clipped is what is actually sent.  Every servo's deadband_deg
+        defaults to 0.0, so this is an exact no-op until a real value is
+        measured on the bench.
+        """
+        previous = getattr(self, "_deadband_previous", None)
+        self._deadband_previous = list(frame)
+        by_channel = getattr(self, "_deadband_by_channel", None)
+        if by_channel is None:
+            by_channel = {
+                servo.pca_channel: servo.deadband_deg
+                for servo in self.calibration.servos.values()
+            }
+            self._deadband_by_channel = by_channel
+        if previous is None or len(previous) != len(frame):
+            return frame
+        if not any(by_channel.values()):
+            return frame
+        biased = list(frame)
+        for channel, value in enumerate(frame):
+            deadband = by_channel.get(channel, 0.0)
+            if deadband > 0.0:
+                biased[channel] = value + deadband_feedforward(
+                    value - previous[channel], deadband
+                )
+        return biased
+
+    def note_firmware_guard_clips(self, frame, now):
+        """Record any channel the firmware's travel guard will truncate."""
+        clips = firmware_guard_clips(frame)
+        if not clips:
+            # Forget a clip that has stopped happening. The banner this feeds
+            # has to describe the CURRENT command, not an all-time record --
+            # the pre-arm idle frame alone would otherwise pin it on forever.
+            if (
+                getattr(self, "guard_clip_channels", None)
+                and now - getattr(self, "guard_clip_last_seen", 0.0) >= 3.0
+            ):
+                self.guard_clip_channels = {}
+            return
+        self.guard_clip_last_seen = now
+        if not hasattr(self, "guard_clip_channels"):
+            self.guard_clip_channels = {}
+            self.guard_clip_frames = 0
+            self.guard_clip_last_log = 0.0
+        self.guard_clip_frames += 1
+        for channel, commanded, guard in clips:
+            worst = self.guard_clip_channels.get(channel)
+            excess = abs(commanded - guard)
+            if worst is None or excess > worst[0]:
+                self.guard_clip_channels[channel] = (excess, commanded, guard)
+        if now - self.guard_clip_last_log >= 2.0:
+            self.guard_clip_last_log = now
+            self.get_logger().warning(
+                "FIRMWARE TRAVEL GUARD is truncating commanded motion: %s. "
+                "The gait is asking for travel this channel is not allowed "
+                "to make, so that foot lands short on every stride."
+                % ", ".join(
+                    "ch%d commanded %.2f deg vs guard %.2f (%.2f deg lost)"
+                    % (channel, commanded, guard, excess)
+                    for channel, (excess, commanded, guard)
+                    in sorted(self.guard_clip_channels.items())
+                )
+            )
+
     def publish_status(self):
         message = String()
         rate_now = self.now_seconds()
@@ -1950,7 +2030,7 @@ class VoltSerialBridge(Node):
             "face_led_count=%d face_effect=%s face_speed=%d "
             "face_queued=%d face_sent=%d face_rejected=%d led_error=%s "
             "pending=%s error=%s response=%s "
-            "clamped=%s frame=%s"
+            "clamped=%s guard_clip=%s guard_clip_frames=%d frame=%s"
             % (
                 int(self.connected),
                 int(self.protocol.ready),
@@ -2030,6 +2110,12 @@ class VoltSerialBridge(Node):
                 ),
                 status_token(self.protocol.last_response),
                 ",".join(clamped),
+                ",".join(
+                    "ch%d:%.2f<%.2f" % (channel, commanded, guard)
+                    for channel, (_excess, commanded, guard)
+                    in sorted(getattr(self, "guard_clip_channels", {}).items())
+                ) or "-",
+                int(getattr(self, "guard_clip_frames", 0)),
                 " ".join("%.2f" % value for value in self.last_frame),
             )
         )

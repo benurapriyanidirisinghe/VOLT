@@ -41,9 +41,24 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from rclpy.node import Node
-from std_msgs.msg import ColorRGBA, String, UInt8, UInt32
+from std_msgs.msg import ColorRGBA, Float64, String, UInt8, UInt32
 
-from volt_gait_controller import GAITS
+from volt_gait_controller import GAITS, clamp
+from volt_gamepad_bindings import (
+    ACTION_CAPTIONS,
+    BINDABLE_ACTIONS,
+    BindingError,
+    DEFAULT_BINDINGS,
+    HAT_INPUTS,
+    all_input_names,
+    bindings_path,
+    button_input,
+    input_caption,
+    load_bindings,
+    reachable_stop_inputs,
+    resolve,
+    save_bindings,
+)
 from volt_kinematics import JOINT_NAMES, LEG_ORDER
 from volt_real_profiles import (
     NUMERIC_BOUNDS,
@@ -114,7 +129,7 @@ EMOTE_REQUEST_ACK_TIMEOUT = 2.0
 EMOTE_ERROR_DISPLAY_TIME = 5.0
 PUSHUP_TRAVEL_MIN_MM = 10.0
 PUSHUP_TRAVEL_MAX_MM = 60.0
-PUSHUP_TRAVEL_DEFAULT_MM = 20.0
+PUSHUP_TRAVEL_DEFAULT_MM = 60.0
 PUSHUP_TRAVEL_BASE_MM = 20.0
 
 DISPLAYED_CARTESIAN_EMOTES = (
@@ -238,17 +253,9 @@ BALANCE_SENSITIVE_EMOTES = {
 }
 
 # Default mapping for common Fantech / Xbox-style controllers.
-BUTTON_ACTIONS = {
-    0: "stand",       # A / Cross
-    1: "sit",         # B / Circle
-    2: "stop",        # X / Square
-    3: "step",        # Y / Triangle
-    4: "prev_gait",   # LB / L1
-    5: "next_gait",   # RB / R1
-    6: "reset_pose",  # Back / Select
-    7: "drive_mode",  # Start / Options
-    8: "stop",        # Left stick press
-}
+# Bindings now live in volt_gamepad_bindings.py and are operator-editable
+# from the GAMEPAD tab. DEFAULT_BINDINGS there reproduces the map that used
+# to be hard-coded here.
 
 AXIS_LEFT_X = 0
 AXIS_LEFT_Y = 1
@@ -554,6 +561,9 @@ class VoltGuiNode(Node):
     ):
         super().__init__("volt_control_gui")
         self.velocity_publisher = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.yaw_trim_publisher = self.create_publisher(
+            Float64, "/volt/yaw_trim", 10
+        )
         self.action_publisher = self.create_publisher(String, "/volt/action", 10)
         self.gait_publisher = self.create_publisher(String, "/volt/gait", 10)
         self.owner_publisher = self.create_publisher(String, "/volt/command_owner", 10)
@@ -773,7 +783,19 @@ class VoltControlWindow(QMainWindow):
         # Start on the stable crawl with zero controls. Command ownership remains
         # unclaimed until the operator explicitly presses ENABLE MOTION.
         self.current_gait = DEFAULT_GAIT
+        # Operator-editable gamepad map. Loaded before any widget is built
+        # because build_gamepad_tab() reads it.
+        self.gamepad_bindings, self.gamepad_binding_load_error = load_bindings()
         self.gait_limits = dict(GAIT_LIMITS)
+        # Hardware-effective limits (max_x * hardware_speed_scale). The GUI
+        # scales the speed slider by THESE, not by the raw command limits:
+        # the controller clamps at the effective value, so scaling the raw
+        # one left the slider's top 20% doing nothing at all.
+        self.effective_limits = dict(GAIT_LIMITS)
+        self.yaw_trim_limit = 0.0
+        self.speed_floor_percent = 10
+        self.yaw_trim_clipped = False
+        self.firmware_guard_clip = "-"
         try:
             shipped_profiles = load_profiles(include_user=False)
             self.real_profiles = load_profiles()
@@ -949,6 +971,8 @@ class VoltControlWindow(QMainWindow):
         emotes_face_page = add_scroll_tab("EMOTES + FACE", "expressionsScroll")
         tuning_page = add_scroll_tab("TUNING", "tuningScroll")
         diagnostics_page = add_scroll_tab("DIAGNOSTICS", "diagnosticsScroll")
+        gamepad_page = add_scroll_tab("GAMEPAD", "gamepadScroll")
+        self.gamepad_tab_index = self.main_tabs.count() - 1
 
         workspace = QHBoxLayout(control_page)
         workspace.setContentsMargins(0, 8, 0, 0)
@@ -1337,6 +1361,12 @@ class VoltControlWindow(QMainWindow):
         self.real_smoothing = self.make_tuning_spinbox(0.0, 0.80, 0.15, 0.02, 2, "")
         self.real_touchdown_percent = self.make_tuning_spinbox(8.0, 35.0, 30.0, 1.0, 0, " %")
         self.real_stance_width_mm = self.make_tuning_spinbox(80.0, 130.0, 104.0, 1.0, 1, " mm")
+        self.real_command_acceleration = self.make_tuning_spinbox(
+            0.02, 0.40, 0.08, 0.01, 2, " m/s²"
+        )
+        self.real_velocity_filter_alpha = self.make_tuning_spinbox(
+            0.05, 1.00, 0.30, 0.01, 2, ""
+        )
         self.real_body_height_mm = self.make_tuning_spinbox(175.0, 220.0, 200.0, 1.0, 1, " mm")
         self.real_body_x_mm = self.make_tuning_spinbox(-25.0, 25.0, 0.0, 1.0, 1, " mm")
         self.real_body_y_mm = self.make_tuning_spinbox(-20.0, 20.0, 0.0, 1.0, 1, " mm")
@@ -1360,6 +1390,8 @@ class VoltControlWindow(QMainWindow):
             ("Smoothing amount", self.real_smoothing),
             ("Touchdown softness", self.real_touchdown_percent),
             ("Stance half-width", self.real_stance_width_mm),
+            ("Command slew rate", self.real_command_acceleration),
+            ("Command low-pass", self.real_velocity_filter_alpha),
             ("Profile body height", self.real_body_height_mm),
             ("Profile body X", self.real_body_x_mm),
             ("Profile body Y", self.real_body_y_mm),
@@ -1401,6 +1433,8 @@ class VoltControlWindow(QMainWindow):
         tuning_right.addWidget(tuning_group)
         tuning_right.addStretch(1)
 
+        self.build_gamepad_tab(gamepad_page)
+
         self.real_tuning_value_controls = [
             self.real_gait_combo,
             self.real_cycle,
@@ -1413,6 +1447,8 @@ class VoltControlWindow(QMainWindow):
             self.real_smoothing,
             self.real_touchdown_percent,
             self.real_stance_width_mm,
+            self.real_command_acceleration,
+            self.real_velocity_filter_alpha,
             self.real_body_height_mm,
             self.real_body_x_mm,
             self.real_body_y_mm,
@@ -1441,10 +1477,10 @@ class VoltControlWindow(QMainWindow):
             0.5, 2.0, 1.0, 0.1, 1, " ×"
         )
         self.emote_amplitude = self.make_tuning_spinbox(
-            0.5, 2.0, 1.0, 0.1, 1, " ×"
+            0.5, 2.0, 2.0, 0.1, 1, " ×"
         )
         self.emote_depth = self.make_tuning_spinbox(
-            0.5, 3.0, 1.0, 0.1, 1, " ×"
+            0.5, 3.0, 3.0, 0.1, 1, " ×"
         )
         self.pushup_travel_mm = self.make_tuning_spinbox(
             PUSHUP_TRAVEL_MIN_MM,
@@ -1474,7 +1510,8 @@ class VoltControlWindow(QMainWindow):
         emote_layout.addWidget(pushup_travel_label, 2, 0)
         emote_layout.addWidget(self.pushup_travel_mm, 2, 1)
         pushup_travel_hint = QLabel(
-            "PUSH-UPS only (10–25 mm); Depth remains for other emotes."
+            "PUSH-UPS only (%.0f–%.0f mm); Depth remains for other emotes."
+            % (PUSHUP_TRAVEL_MIN_MM, PUSHUP_TRAVEL_MAX_MM)
         )
         pushup_travel_hint.setObjectName("gaitDetail")
         pushup_travel_hint.setWordWrap(True)
@@ -1714,6 +1751,29 @@ class VoltControlWindow(QMainWindow):
         self.gait_diagnostics.setWordWrap(True)
         self.gait_diagnostics.setObjectName("gaitDetail")
         diagnostic_layout.addWidget(self.gait_diagnostics, 7, 0, 1, 4)
+        # Live command path: commanded -> post-clamp -> resolved, so it is
+        # visible which stage zeroed or shrank a command.
+        self.command_path_diagnostics = QLabel(
+            "Command path will appear here."
+        )
+        self.command_path_diagnostics.setWordWrap(True)
+        self.command_path_diagnostics.setObjectName("gaitDetail")
+        self.command_path_diagnostics.setStyleSheet(
+            "font-family: monospace; color: #cbd5e1;"
+        )
+        diagnostic_layout.addWidget(
+            self.command_path_diagnostics, 8, 0, 1, 4
+        )
+        # Loud gate banner: a clamp that silently discards commanded motion
+        # is exactly what hid the front-right knee guard for so long.
+        self.gate_banner = QLabel("")
+        self.gate_banner.setWordWrap(True)
+        self.gate_banner.setVisible(False)
+        self.gate_banner.setStyleSheet(
+            "background: #7f1d1d; color: #fee2e2; font-weight: bold;"
+            " padding: 6px; border-radius: 4px;"
+        )
+        diagnostic_layout.addWidget(self.gate_banner, 9, 0, 1, 4)
         diagnostics_layout.addWidget(
             diagnostic_group,
             0,
@@ -1795,6 +1855,234 @@ class VoltControlWindow(QMainWindow):
         self.arm_mutation_controls.extend(self.diagnostic_buttons)
         self.arm_mutation_controls.extend(self.emote_start_buttons)
         self.arm_mutation_controls.extend(self.gait_button_by_name.values())
+
+    # ----------------------------------------------------------------- #
+    # GAMEPAD tab: map any button or D-pad direction to any action        #
+    # ----------------------------------------------------------------- #
+
+    class _NoWheelComboBox(QComboBox):
+        """A combo that ignores the wheel unless it has focus.
+
+        Inside a QScrollArea a plain QComboBox swallows wheel events, so
+        scrolling the binding grid with the pointer over a row silently
+        rebinds that control -- possibly away from STOP, on an armed robot.
+        """
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setFocusPolicy(Qt.StrongFocus)
+
+        def wheelEvent(self, event):
+            if self.hasFocus():
+                super().wheelEvent(event)
+            else:
+                event.ignore()
+
+    def build_gamepad_tab(self, page):
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Map each control to an action. Press a control on the pad and "
+            "its row highlights, so you can identify a button without "
+            "knowing its number. Changes apply immediately; SAVE keeps them "
+            "for next launch."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("gaitDetail")
+        layout.addWidget(intro)
+
+        self.gamepad_binding_warning = QLabel("")
+        self.gamepad_binding_warning.setWordWrap(True)
+        self.gamepad_binding_warning.setVisible(False)
+        self.gamepad_binding_warning.setStyleSheet(
+            "background: #7f1d1d; color: #fee2e2; font-weight: bold;"
+            " padding: 6px; border-radius: 4px;"
+        )
+        layout.addWidget(self.gamepad_binding_warning)
+
+        group = QGroupBox("Control bindings")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+        for column, title in enumerate(("Control", "Action", "", "Control", "Action", "")):
+            label = QLabel(title)
+            label.setObjectName("poseCaption")
+            grid.addWidget(label, 0, column)
+
+        self.gamepad_binding_combos = {}
+        self.gamepad_binding_labels = {}
+        names = all_input_names()
+        half = (len(names) + 1) // 2
+        for index, name in enumerate(names):
+            row = 1 + (index % half)
+            base = 0 if index < half else 3
+            caption = QLabel(input_caption(name))
+            caption.setObjectName("gaitDetail")
+            combo = self._NoWheelComboBox()
+            for action, action_caption, group_name in BINDABLE_ACTIONS:
+                combo.addItem(
+                    action_caption if group_name in ("None", "Motion")
+                    else "%s — %s" % (group_name, action_caption),
+                    action,
+                )
+            combo.currentIndexChanged.connect(
+                lambda _index, key=name: self.gamepad_binding_changed(key)
+            )
+            live = QLabel("")
+            live.setFixedWidth(16)
+            grid.addWidget(caption, row, base)
+            grid.addWidget(combo, row, base + 1)
+            grid.addWidget(live, row, base + 2)
+            self.gamepad_binding_combos[name] = combo
+            self.gamepad_binding_labels[name] = live
+        layout.addWidget(group)
+
+        buttons = QHBoxLayout()
+        self.gamepad_save_button = QPushButton("SAVE BINDINGS")
+        self.gamepad_save_button.clicked.connect(self.save_gamepad_bindings)
+        self.gamepad_reload_button = QPushButton("RELOAD SAVED")
+        self.gamepad_reload_button.clicked.connect(self.reload_gamepad_bindings)
+        self.gamepad_defaults_button = QPushButton("RESTORE DEFAULTS")
+        self.gamepad_defaults_button.clicked.connect(
+            self.restore_default_gamepad_bindings
+        )
+        for button in (
+            self.gamepad_save_button,
+            self.gamepad_reload_button,
+            self.gamepad_defaults_button,
+        ):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.gamepad_binding_status = QLabel("")
+        self.gamepad_binding_status.setWordWrap(True)
+        self.gamepad_binding_status.setObjectName("gaitDetail")
+        layout.addWidget(self.gamepad_binding_status)
+        layout.addStretch(1)
+
+        self.refresh_gamepad_binding_controls()
+        if self.gamepad_binding_load_error:
+            self.set_gamepad_binding_status(
+                self.gamepad_binding_load_error, "#fca5a5"
+            )
+        else:
+            self.set_gamepad_binding_status(
+                "Loaded from %s" % bindings_path(), "#94a3b8"
+            )
+
+    def set_gamepad_binding_status(self, text, color="#94a3b8"):
+        self.gamepad_binding_status.setText(str(text))
+        self.gamepad_binding_status.setStyleSheet("color: %s;" % color)
+
+    def refresh_gamepad_binding_controls(self):
+        """Push the active bindings into the combo boxes without recursing."""
+        for name, combo in self.gamepad_binding_combos.items():
+            action = resolve(self.gamepad_bindings, name)
+            position = combo.findData(action)
+            if position < 0:
+                position = combo.findData("")
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, position))
+            combo.blockSignals(blocked)
+        self.refresh_gamepad_binding_warning()
+
+    def refresh_gamepad_binding_warning(self):
+        """STOP must stay reachable from the pad; say so loudly if it is not."""
+        # "Bound to STOP" is not enough: the grid offers Button 0..19 whatever
+        # is plugged in, so STOP on Button 14 of an 11-button pad is a STOP no
+        # physical control can send.
+        count = None
+        if self.gamepad is not None:
+            try:
+                count = self.gamepad.get_numbuttons()
+            except Exception:
+                count = None
+        has_stop = bool(reachable_stop_inputs(self.gamepad_bindings, count))
+        self.gamepad_binding_warning.setVisible(not has_stop)
+        if not has_stop:
+            self.gamepad_binding_warning.setText(
+                "NO CONTROL ON THIS PAD CAN SEND STOP. The guided ARM "
+                "sequence accepts only STOP from the gamepad, so right now "
+                "the pad has no emergency action. Bind STOP to a control the "
+                "connected controller actually has, then arm."
+            )
+        # The banner sits on one tab, and the operator will not be looking at
+        # it. Bindings apply the moment they are changed, so the loss of STOP
+        # has to be visible from wherever they are: mark the tab label, which
+        # is always on screen.
+        index = getattr(self, "gamepad_tab_index", None)
+        if index is not None:
+            self.main_tabs.setTabText(
+                index, "GAMEPAD" if has_stop else "GAMEPAD  ⚠ NO STOP"
+            )
+
+    def gamepad_binding_changed(self, name):
+        combo = self.gamepad_binding_combos.get(name)
+        if combo is None:
+            return
+        self.gamepad_bindings[name] = combo.currentData() or ""
+        self.refresh_gamepad_binding_warning()
+        action = self.gamepad_bindings[name]
+        self.set_gamepad_binding_status(
+            "%s → %s (unsaved)"
+            % (input_caption(name), ACTION_CAPTIONS.get(action, "unbound")),
+            "#7dd3fc",
+        )
+
+    def save_gamepad_bindings(self):
+        try:
+            target = save_bindings(self.gamepad_bindings)
+        except BindingError as exc:
+            self.set_gamepad_binding_status("Not saved: %s" % exc, "#fca5a5")
+            return
+        except OSError as exc:
+            # An unwritable config directory used to let PermissionError
+            # escape the slot: a traceback on stderr the operator never sees,
+            # and a console that quietly did not save. Same handling as the
+            # face and tuning-profile saves.
+            self.set_gamepad_binding_status(
+                "Not saved: %s" % exc, "#fca5a5"
+            )
+            return
+        self.set_gamepad_binding_status("Saved to %s" % target, "#86efac")
+
+    def reload_gamepad_bindings(self):
+        self.gamepad_bindings, error = load_bindings()
+        self.gamepad_binding_load_error = error
+        self.refresh_gamepad_binding_controls()
+        self.set_gamepad_binding_status(
+            error or "Reloaded from %s" % bindings_path(),
+            "#fca5a5" if error else "#86efac",
+        )
+
+    def restore_default_gamepad_bindings(self):
+        self.gamepad_bindings = dict(DEFAULT_BINDINGS)
+        self.refresh_gamepad_binding_controls()
+        self.set_gamepad_binding_status(
+            "Defaults restored (unsaved).", "#7dd3fc"
+        )
+
+    def refresh_gamepad_binding_indicators(self):
+        """Light the row for whatever is physically held right now."""
+        labels = getattr(self, "gamepad_binding_labels", None)
+        if not labels:
+            return
+        for name, label in labels.items():
+            # poll_gamepad keys buttons by their integer index and the D-pad
+            # directions by name, so the lookup differs per input kind.
+            if name.startswith("button_"):
+                try:
+                    key = int(name.split("_")[1])
+                except (ValueError, IndexError):
+                    continue
+            else:
+                key = name
+            held = bool(self.gamepad_buttons.get(key, False))
+            label.setText("●" if held else "")
+            label.setStyleSheet("color: #86efac;" if held else "")
 
     def make_spinbox(self, minimum, maximum, value, step, decimals):
         box = QDoubleSpinBox()
@@ -2124,6 +2412,9 @@ class VoltControlWindow(QMainWindow):
         60 s of walking with the face animating, so those two lead the line
         and turn the label red when nonzero.
         """
+        # The firmware travel guard clips silently; the bridge mirrors it and
+        # reports here so the GUI can name it in the gate banner.
+        self.firmware_guard_clip = fields.get("guard_clip", "-")
         label = getattr(self, "firmware_link_label", None)
         if label is None or "fw_crc_fail" not in fields:
             return
@@ -2580,6 +2871,8 @@ class VoltControlWindow(QMainWindow):
             "smoothing_amount": self.real_smoothing.value(),
             "touchdown_softness": self.real_touchdown_percent.value() / 100.0,
             "stance_width": self.real_stance_width_mm.value() / 1000.0,
+            "command_acceleration": self.real_command_acceleration.value(),
+            "velocity_filter_alpha": self.real_velocity_filter_alpha.value(),
         }
         return validate_tuning(values, allow_simulation=True)
 
@@ -2615,6 +2908,12 @@ class VoltControlWindow(QMainWindow):
                 values["touchdown_softness"] * 100.0
             )
             self.real_stance_width_mm.setValue(values["stance_width"] * 1000.0)
+            self.real_command_acceleration.setValue(
+                values["command_acceleration"]
+            )
+            self.real_velocity_filter_alpha.setValue(
+                values["velocity_filter_alpha"]
+            )
         finally:
             for control, blocked in zip(controls, previous):
                 control.blockSignals(blocked)
@@ -3345,11 +3644,24 @@ class VoltControlWindow(QMainWindow):
         self.motion_neutral_latched = True
         self.motion_neutral_since = 0.0
 
+    def effective_gait_limits_for(self, gait):
+        """Hardware-effective (max_x, max_y, max_yaw) for a gait."""
+        return self.effective_limits.get(
+            gait, self.gait_limits.get(gait, GAIT_LIMITS["trot"])
+        )
+
     def motion_inputs_are_neutral(self):
+        # The yaw trim is deliberately NOT part of this test. It used to be,
+        # and that was a trap: in Normal steering the trim never reaches the
+        # Twist at all, yet a forgotten non-zero trim meant the neutral latch
+        # could never release, so after any ownership blip or ARM the GUI
+        # published zeros forever with no indication why. The trim is now a
+        # bias on an existing command and cannot start motion by itself
+        # (the controller ignores it when vx and vy are zero), so it has no
+        # business gating the release.
         return (
             abs(self.forward) <= 1e-6
             and abs(self.horizontal) <= 1e-6
-            and self.yaw_slider.value() == 0
         )
 
     def neutral_latch_allows_motion(self, now):
@@ -3522,8 +3834,18 @@ class VoltControlWindow(QMainWindow):
             return
         now = time.monotonic()
         self.publish_owner_heartbeat(now)
+        # SPEED LIMIT is a CLAMP on the output magnitude, not a gain on the
+        # stick.  For a keyboard or D-pad (forward is always +-1.0) the two
+        # are identical; for an analogue stick the clamp keeps full
+        # resolution up to the cap instead of compressing the whole
+        # proportional band.  The limits used here are the HARDWARE-EFFECTIVE
+        # ones: scaling the unscaled command limit is what made the top 20%
+        # of the slider dead, because the controller clamps at
+        # max_x * hardware_speed_scale (0.80) anyway.
         speed = self.speed_slider.value() / 100.0
-        max_x, max_y, max_yaw = self.gait_limits[self.current_gait]
+        max_x, max_y, max_yaw = self.effective_gait_limits_for(
+            self.current_gait
+        )
         message = Twist()
         motion_allowed = (
             self.motion_state == "standing"
@@ -3536,17 +3858,33 @@ class VoltControlWindow(QMainWindow):
         if not motion_allowed:
             self.latch_motion_until_neutral()
         elif self.neutral_latch_allows_motion(now):
-            message.linear.x = self.forward * max_x * speed
+            cap_x = max_x * speed
+            cap_y = max_y * speed
+            cap_yaw = max_yaw * speed
+            message.linear.x = clamp(self.forward * max_x, -cap_x, cap_x)
 
             if self.drive_mode.currentIndex() == 0:
-                message.angular.z = -self.horizontal * max_yaw * speed
-            else:
-                message.linear.y = -self.horizontal * max_y * speed
-                message.angular.z = (
-                    self.yaw_slider.value() / 100.0 * max_yaw * speed
+                message.angular.z = clamp(
+                    -self.horizontal * max_yaw, -cap_yaw, cap_yaw
                 )
+            else:
+                message.linear.y = clamp(
+                    -self.horizontal * max_y, -cap_y, cap_y
+                )
+            # YAW TRIM never rides in the Twist. angular.z is inside the
+            # controller's combined-axis (L1) cap, which rescales vx to make
+            # room for yaw -- so a trim carried there would reduce forward
+            # speed, which is precisely what it must not do. It goes out on
+            # its own channel and is added after that cap.
         try:
             self.ros_node.velocity_publisher.publish(message)
+            trim = Float64()
+            trim.data = (
+                self.yaw_slider.value() / 100.0 * self.yaw_trim_limit
+                if motion_allowed
+                else 0.0
+            )
+            self.ros_node.yaw_trim_publisher.publish(trim)
         except Exception:
             return
         if (
@@ -3703,6 +4041,31 @@ class VoltControlWindow(QMainWindow):
                     "Gamepad %s" % str(action).strip().upper()
                 )
             return
+        # Prefixed forms come from the bindings tab. They route to the same
+        # entry points the on-screen buttons use, so every guard those apply
+        # -- ownership, arm workflow, emote advertisement, the balance-
+        # sensitive confirmation -- applies identically to a gamepad press.
+        if action.startswith("emote:"):
+            self.start_emote(action.partition(":")[2])
+            return
+        if action.startswith("face:"):
+            # publish=True: a bound face key should change the face, not just
+            # move the combo box.
+            self.select_face_preset(action.partition(":")[2], publish=True)
+            return
+        if action.startswith("gait:"):
+            self.select_gait(action.partition(":")[2])
+            return
+        if action == "speed_up":
+            self.speed_slider.setValue(
+                min(self.speed_slider.maximum(), self.speed_slider.value() + 10)
+            )
+            return
+        if action == "speed_down":
+            self.speed_slider.setValue(
+                max(self.speed_slider.minimum(), self.speed_slider.value() - 10)
+            )
+            return
         if action == "prev_gait":
             self.choose_gait_offset(-1)
         elif action == "next_gait":
@@ -3715,9 +4078,35 @@ class VoltControlWindow(QMainWindow):
         else:
             self.send_action(action)
 
+    def read_hat_inputs(self):
+        """Current D-pad state keyed by binding input name."""
+        if self.gamepad is None or self.gamepad.get_numhats() <= 0:
+            return {name: False for name in HAT_INPUTS}
+        hat_x, hat_y = self.gamepad.get_hat(0)
+        return {
+            "hat_left": hat_x < 0,
+            "hat_right": hat_x > 0,
+            "hat_up": hat_y > 0,
+            "hat_down": hat_y < 0,
+        }
+
     def poll_gamepad(self):
-        if not self.gamepad_available:
+        """Poll the pad, then ALWAYS repaint the tab's live state.
+
+        The body has four early returns (no pad, disconnected, disabled,
+        guided ARM). Repainting only at the tail meant a control held at the
+        last full poll left its green dot lit indefinitely -- and those dots
+        are exactly how the operator identifies which physical button is
+        which, so a stale one is worse than none.
+        """
+        try:
+            self._poll_gamepad_inputs()
+        finally:
+            self.refresh_gamepad_binding_indicators()
             self.update_gamepad_status()
+
+    def _poll_gamepad_inputs(self):
+        if not self.gamepad_available:
             return
 
         try:
@@ -3726,27 +4115,36 @@ class VoltControlWindow(QMainWindow):
                 if self.gamepad is not None:
                     self.handle_gamepad_disconnect()
                 self.refresh_gamepad()
-                self.update_gamepad_status()
                 return
 
             if not self.gamepad_enabled:
-                self.update_gamepad_status()
                 return
 
             if self.arm_workflow.active:
                 self.joystick.set_vector(0.0, 0.0)
                 self.yaw_slider.setValue(0)
-                for index in range(self.gamepad.get_numbuttons()):
-                    pressed = bool(self.gamepad.get_button(index))
-                    was_pressed = self.gamepad_buttons.get(index, False)
+                held = {
+                    index: bool(self.gamepad.get_button(index))
+                    for index in range(self.gamepad.get_numbuttons())
+                }
+                # The D-pad is polled here too. It did not used to be, because
+                # STOP could only live on a numbered button; now that any
+                # control can carry STOP, skipping the hat would make a
+                # D-pad-bound STOP dead during the one sequence that accepts
+                # nothing else from the pad. Recording its edge state here
+                # also stops a direction held across the end of the workflow
+                # from firing its action the instant arming completes.
+                held.update(self.read_hat_inputs())
+                for key, pressed in held.items():
+                    was_pressed = self.gamepad_buttons.get(key, False)
+                    name = key if isinstance(key, str) else button_input(key)
                     if (
                         pressed
                         and not was_pressed
-                        and BUTTON_ACTIONS.get(index) == "stop"
+                        and resolve(self.gamepad_bindings, name) == "stop"
                     ):
                         self.send_action("stop")
-                    self.gamepad_buttons[index] = pressed
-                self.update_gamepad_status()
+                    self.gamepad_buttons[key] = pressed
                 return
 
             left_x = self.axis_value(AXIS_LEFT_X)
@@ -3758,21 +4156,19 @@ class VoltControlWindow(QMainWindow):
             for index in range(self.gamepad.get_numbuttons()):
                 pressed = bool(self.gamepad.get_button(index))
                 was_pressed = self.gamepad_buttons.get(index, False)
-                if pressed and not was_pressed and index in BUTTON_ACTIONS:
-                    self.handle_gamepad_action(BUTTON_ACTIONS[index])
+                action = resolve(self.gamepad_bindings, button_input(index))
+                if pressed and not was_pressed and action:
+                    self.handle_gamepad_action(action)
                 self.gamepad_buttons[index] = pressed
 
-            if self.gamepad.get_numhats() > 0:
-                hat_x, _hat_y = self.gamepad.get_hat(0)
-                if hat_x != 0 and not self.gamepad_buttons.get("hat_x", False):
-                    self.choose_gait_offset(1 if hat_x > 0 else -1)
-                    self.gamepad_buttons["hat_x"] = True
-                elif hat_x == 0:
-                    self.gamepad_buttons["hat_x"] = False
+            for name, pressed in self.read_hat_inputs().items():
+                was_pressed = self.gamepad_buttons.get(name, False)
+                action = resolve(self.gamepad_bindings, name)
+                if pressed and not was_pressed and action:
+                    self.handle_gamepad_action(action)
+                self.gamepad_buttons[name] = pressed
         except pygame.error:
             self.handle_gamepad_disconnect()
-
-        self.update_gamepad_status()
 
     def status_callback(self, message):
         if self.duplicate_stack_active:
@@ -3932,8 +4328,31 @@ class VoltControlWindow(QMainWindow):
                             )
                         ),
                     )
+                    # The hardware-effective limits are what the controller
+                    # actually clamps at; the slider is scaled by these.
+                    self.effective_limits[gait_name] = (
+                        float(gait_limit.get("max_x")),
+                        float(gait_limit.get("max_y")),
+                        float(gait_limit.get("max_yaw")),
+                    )
                 except (KeyError, TypeError, ValueError):
                     continue
+        self.yaw_trim_limit = status_number("yaw_trim_limit")
+        self.yaw_trim_clipped = status.get("yaw_trim_clipped") in (
+            True, 1, "1", "true", "True"
+        )
+        floor_fraction = status_number("speed_floor_fraction")
+        if 0.0 < floor_fraction < 1.0:
+            floor_percent = max(10, min(90, int(math.ceil(floor_fraction * 100.0))))
+            if floor_percent != self.speed_floor_percent:
+                self.speed_floor_percent = floor_percent
+                # Below this the cadence law can no longer stretch the cycle,
+                # so the stride shrinks back into the band the floor exists
+                # to avoid. Move the slider's minimum rather than silently
+                # letting the operator command a stride that cannot travel.
+                self.speed_slider.setMinimum(floor_percent)
+                if self.speed_slider.value() < floor_percent:
+                    self.speed_slider.setValue(floor_percent)
         if requested in self.gait_limits:
             self.current_gait = requested
             button = self.gait_button_by_name.get(requested)
@@ -3990,6 +4409,87 @@ class VoltControlWindow(QMainWindow):
         arduino_frame_rate = status_number("arduino_frame_rate")
         cycle_period = status_number("cycle_period")
         swing = list(status.get("swing_legs", []))
+
+        # ------------------------------------------------------------------
+        # COMMAND PATH, live. Every stage that can shrink or zero a command,
+        # in the order it is applied, so it is visible WHICH stage did it.
+        # ------------------------------------------------------------------
+        def triple(name):
+            value = status.get(name)
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                try:
+                    return tuple(float(v) for v in value[:3])
+                except (TypeError, ValueError):
+                    return (0.0, 0.0, 0.0)
+            return (0.0, 0.0, 0.0)
+
+        commanded = triple("commanded_velocity")
+        clamped = triple("clamped_velocity")
+        heights = status.get("swing_height_mm")
+        if isinstance(heights, dict) and heights:
+            lift_text = "  ".join(
+                "%s %.0f" % (leg.replace("front_", "F").replace("rear_", "R")
+                             .replace("left", "L").replace("right", "R"),
+                             float(value))
+                for leg, value in sorted(heights.items())
+            )
+        else:
+            lift_text = "n/a"
+        trim_value = status_number("yaw_trim")
+        trim_limit = status_number("yaw_trim_limit")
+        trim_text = "%+.3f / %.2f rad/s" % (trim_value, trim_limit)
+        if trim_limit <= 1e-9:
+            trim_text += "  (NO HEADROOM on this gait)"
+        elif self.yaw_trim_clipped:
+            trim_text += "  (CLIPPED to limit)"
+        # ---- LOUD GATES ----------------------------------------------
+        # Anything that silently discards commanded motion gets named here.
+        gates = []
+        if self.firmware_guard_clip and self.firmware_guard_clip != "-":
+            gates.append(
+                "FIRMWARE TRAVEL GUARD clipping %s "
+                "(channel:commanded<guard, deg) - that foot lands short "
+                "every stride" % self.firmware_guard_clip
+            )
+        if self.yaw_trim_clipped:
+            gates.append(
+                "YAW TRIM clipped to this gait's %.2f rad/s budget headroom"
+                % trim_limit
+            )
+        if projected:
+            gates.append(
+                "IK WORKSPACE PROJECTION on %s - the commanded foot target "
+                "is out of reach" % ", ".join(projected)
+            )
+        if clamped:
+            gates.append(
+                "JOINT LIMIT CLAMP on %s"
+                % ", ".join(str(joint) for joint in clamped)
+            )
+        if gates:
+            self.gate_banner.setText("GATE: " + "\nGATE: ".join(gates))
+            self.gate_banner.setVisible(True)
+        else:
+            self.gate_banner.setVisible(False)
+
+        self.command_path_diagnostics.setText(
+            "commanded  vx %+.4f  vy %+.4f  wz %+.4f m/s, rad/s\n"
+            "post-clamp vx %+.4f  vy %+.4f  wz %+.4f   yaw trim %s\n"
+            "phase %.0f%%  |  cadence %.3f Hz (cycle %.2f s)  duty %.2f\n"
+            "stride %.1f mm (target %.1f)  |  swing height mm  %s"
+            % (
+                commanded[0], commanded[1], commanded[2],
+                clamped[0], clamped[1], clamped[2], trim_text,
+                100.0 * max(0.0, min(1.0, phase_progress)),
+                status_number("cadence_hz"),
+                cycle_period,
+                status_number("duty_factor"),
+                status_number("resolved_stride_m") * 1000.0,
+                status_number("stride_floor_m") * 1000.0,
+                lift_text,
+            )
+        )
+
         self.gait_diagnostics.setText(
             "Cycle period: %.2f s | Swing: %s\n"
             "Velocity clamps: %d | Acceleration clamps: %d | "
@@ -4637,6 +5137,26 @@ class VoltControlWindow(QMainWindow):
         if self.shutting_down or not rclpy.ok():
             return
         if self.duplicate_stack_active:
+            self.refresh_arm_button()
+            return
+
+        arm_stop_count = None
+        if self.gamepad is not None:
+            try:
+                arm_stop_count = self.gamepad.get_numbuttons()
+            except Exception:
+                arm_stop_count = None
+        if self.gamepad_enabled and not reachable_stop_inputs(
+            self.gamepad_bindings, arm_stop_count
+        ):
+            # An enabled pad with no STOP binding is a controller whose
+            # emergency action does not exist, and the guided ARM sequence
+            # accepts STOP and nothing else from it.
+            self.arm_workflow_notice = (
+                "ARM blocked: the gamepad is enabled but no control is bound "
+                "to STOP. Bind STOP on the GAMEPAD tab, or disable the "
+                "gamepad."
+            )
             self.refresh_arm_button()
             return
 

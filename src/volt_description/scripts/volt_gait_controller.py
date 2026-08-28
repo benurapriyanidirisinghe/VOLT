@@ -137,6 +137,15 @@ GAIT_PARAMETER_NAMES = (
     "joint_acceleration_limit_deg_s2",
     "stance_velocity_budget_deg_s",
     "swing_velocity_budget_deg_s",
+    # Speed-scaled cadence. See resolved_cadence().
+    "speed_scaled_cadence",
+    "stride_target_m",
+    "cadence_min_hz",
+    "stride_floor_m",
+    # Additive heading bias; see the yaw-trim note in validate_servo_budget.
+    "yaw_trim_limit_rad_s",
+    # Push the supporting diagonal up while the other pair swings.
+    "stance_push_m",
 )
 
 def _phase_separation(first, second):
@@ -256,9 +265,162 @@ def smoothstep(value):
     return value * value * (3.0 - 2.0 * value)
 
 
+def resolved_cadence(config, velocity):
+    """Cadence in Hz for a commanded twist: FREQUENCY carries the speed.
+
+    The old engine ran a fixed cadence and expressed the whole speed command
+    as stride length, so a half-speed command took the same number of steps
+    at half the size.  On this open-loop robot that is the difference
+    between walking and not: a 29.6 mm stride is recorded in
+    gait_controller.yaml as having "run on the spot" because stance slip and
+    ~18 mm of servo droop consume a step that small, and the default 20%
+    slider resolved to a 20.8 mm trot stride -- below that floor.  The
+    motors load up, the legs cycle, and the robot does not travel.
+
+    So hold the stride and move the cadence:
+
+        f = clamp(|v| * duty / stride_target, cadence_min_hz, 1/cycle_period)
+
+    At the gait's own maximum command this returns exactly 1/cycle_period,
+    which is the operating point validate_servo_budget sweeps -- so the
+    servo budget still bounds the fastest case.  Below it the cadence drops
+    and the stride stays at stride_target until cadence_min_hz is reached;
+    under that the stride shrinks again, which is what stride_floor_m and
+    the GUI's slider floor exist to keep the operator out of.
+
+    Slower is also safer here: stance joint rate depends on |v| alone, and
+    swing rate scales with cadence, so every point below the maximum sits
+    strictly inside the budget the maximum already passed.
+    """
+    if not config.get("speed_scaled_cadence", False):
+        return 1.0 / config["cycle_period"]
+    speed = fastest_foot_speed(velocity)
+    cadence_max = 1.0 / config["cycle_period"]
+    target = config.get("stride_target_m", 0.0)
+    if target <= 0.0:
+        return cadence_max
+    return clamp(
+        speed * config["duty_factor"] / target,
+        config["cadence_min_hz"],
+        cadence_max,
+    )
+
+
+def fastest_foot_speed(velocity):
+    """Stance speed of the fastest foot for a twist (m/s).
+
+    NOT the body's linear speed.  A stance foot moves at
+    ``(vx - wz*y, vy + wz*x)`` in the body frame, so under yaw the outer
+    feet travel considerably faster than the body: at the mixed command the
+    budget sweep uses, a front foot runs 0.044 m/s against a body speed of
+    0.032.  The cadence law has to size the cycle by whichever foot has the
+    furthest to go, or that foot overruns stride_target and walks itself out
+    of the reachable workspace -- which is exactly what the full-cycle IK
+    test caught when this used hypot(vx, vy).
+    """
+    vx, vy, wz = (float(value) for value in velocity)
+    return max(
+        math.hypot(vx - wz * NOMINAL_FEET[leg][1], vy + wz * NOMINAL_FEET[leg][0])
+        for leg in LEG_ORDER
+    )
+
+
+def resolved_stride(config, velocity):
+    """Stance excursion (m) of the fastest foot under the cadence law."""
+    return fastest_foot_speed(velocity) * config["duty_factor"] / max(
+        resolved_cadence(config, velocity), 1e-6
+    )
+
+
+def minimum_speed_for_stride(config, stride):
+    """Lowest |v| whose resolved stride still reaches ``stride`` (m/s).
+
+    Below cadence_min_hz the cadence cannot drop any further, so the stride
+    falls with the command; this is the speed where that starts to bite.
+    """
+    if stride <= 0.0 or not config.get("speed_scaled_cadence", False):
+        return 0.0
+    return stride * config["cadence_min_hz"] / max(config["duty_factor"], 1e-6)
+
+
+def peak_stance_excursion(config, velocity):
+    """Worst-case stance excursion including the cadence_min_hz floor."""
+    return fastest_foot_speed(velocity) * config["duty_factor"] / max(
+        config["cadence_min_hz"], 1e-6
+    )
+
+
+def swing_phase_progress(config, phase):
+    """Progress through the current swing, 0..1, or None if all feet planted."""
+    duty = config["duty_factor"]
+    offsets = GAIT_PHASE_OFFSETS[config["type"]]
+    best = None
+    for leg in LEG_ORDER:
+        local = (phase + offsets[leg]) % 1.0
+        if local < duty:
+            continue
+        progress = (local - duty) / max(1.0 - duty, 1e-6)
+        if best is None or progress > best:
+            best = progress
+    return best
+
+
+def stance_push_offset(config, phase):
+    """Body-height rise (m) while a diagonal is airborne.
+
+    The supporting pair carries the whole 52 N alone during a trot and
+    visibly sags -- the operator's description was that the robot "stands on
+    2 feet and bends", and the swinging feet then drag because the body has
+    dropped out from under them by about as much as they were told to lift.
+
+    Raising step_height steps OVER that; this pushes BACK against it. The
+    supporting legs are commanded to extend exactly while the other pair is
+    airborne, so the body is held up when it would otherwise be sinking, and
+    the feet clear by the push as well as the lift. It returns to zero at
+    the four-foot overlap, where the load is shared and the sag is smallest,
+    so there is no step at the handoff.
+
+    sin^2 for the same reason swing_lift uses it: zero slope at both ends,
+    so the body is never asked to change height discontinuously.
+    """
+    push = config.get("stance_push_m", 0.0)
+    if push <= 0.0:
+        return 0.0
+    progress = swing_phase_progress(config, phase)
+    if progress is None:
+        return 0.0
+    return push * math.sin(math.pi * clamp(progress, 0.0, 1.0)) ** 2
+
+
 def swing_lift(progress, height):
     """Vertical swing profile: zero velocity at liftoff and touchdown."""
     return height * math.sin(math.pi * clamp(progress, 0.0, 1.0)) ** 2
+
+
+def swing_transfer(progress, duty):
+    """Body-frame horizontal swing profile, as the live engine flies it.
+
+    VoltGaitController.step interpolates the swing foot in the WORLD frame
+    with smoothstep, while the body advances underneath it.  Expressed
+    body-relative that is NOT smoothstep.  With s = (1 - duty) / duty:
+
+        offset(p) / excursion = (1 + s) * smoothstep(p) - s * p - 0.5
+
+    a cubic whose end slopes are -s rather than zero -- i.e. the swing foot
+    leaves and arrives moving backwards at exactly the stance foot's speed.
+    That is the right shape (it is why the foot lands without scuffing), but
+    it is faster in the middle than smoothstep: peak slope 1.5 + 0.5 * s
+    against smoothstep's 1.5.
+
+    This is derived here because validate_servo_budget is the servo guard,
+    and a guard that sweeps a trajectory the robot never runs is not a
+    guard.  Sweeping plain smoothstep understated RUN's peak commanded
+    swing rate as 173 deg/s when the live engine commands 190 -- the whole
+    budget, reported as 17 deg/s of headroom.
+    """
+    s = (1.0 - duty) / max(duty, 1e-6)
+    p = clamp(progress, 0.0, 1.0)
+    return (1.0 + s) * smoothstep(p) - s * p - 0.5
 
 
 # --------------------------------------------------------------------------
@@ -356,6 +518,11 @@ def _validate_gait_config(name, raw):
     if unknown:
         raise ValueError("gait %s has unknown keys: %s" % (name, ", ".join(unknown)))
     for key in GAIT_PARAMETER_NAMES:
+        if key == "speed_scaled_cadence":
+            if not isinstance(raw[key], bool):
+                raise ValueError("%s.%s must be true or false" % (name, key))
+            config[key] = raw[key]
+            continue
         config[key] = _require_number(name, key, raw[key])
 
     if not 0.4 <= config["cycle_period"] <= 4.0:
@@ -412,6 +579,44 @@ def _validate_gait_config(name, raw):
         raise ValueError(
             "%s swing budget exceeds its own joint_velocity_limit_deg_s" % name
         )
+    config["speed_scaled_cadence"] = bool(config["speed_scaled_cadence"])
+    cadence_max = 1.0 / config["cycle_period"]
+    if not 0.05 <= config["cadence_min_hz"] <= cadence_max + 1e-9:
+        raise ValueError(
+            "%s cadence_min_hz must be in [0.05, %.3f] (1/cycle_period)"
+            % (name, cadence_max)
+        )
+    shipped_stride = (
+        config["max_x"] * config["hardware_speed_scale"]
+        * config["duty_factor"] * config["cycle_period"]
+    )
+    if not 0.010 <= config["stride_target_m"] <= 0.200:
+        raise ValueError("%s stride_target_m must be in [0.010, 0.200] m" % name)
+    if abs(config["stride_target_m"] - shipped_stride) > 1e-4:
+        # The cadence law is f = v*duty/stride_target, so at the gait's own
+        # maximum command it must resolve to exactly 1/cycle_period -- the
+        # point validate_servo_budget sweeps.  A stride_target that does not
+        # match would let the top of the slider run a cadence the budget
+        # never checked.
+        raise ValueError(
+            "%s stride_target_m %.4f must equal max_x*hardware_speed_scale*"
+            "duty_factor*cycle_period = %.4f"
+            % (name, config["stride_target_m"], shipped_stride)
+        )
+    if not 0.0 <= config["stride_floor_m"] <= config["stride_target_m"]:
+        raise ValueError(
+            "%s stride_floor_m must be in [0, stride_target_m]" % name
+        )
+    if not 0.0 <= config["yaw_trim_limit_rad_s"] <= 0.30:
+        raise ValueError(
+            "%s yaw_trim_limit_rad_s must be in [0, 0.30] rad/s" % name
+        )
+    # 0.010 is a hard ceiling because past ~0.012 the front knees leave the
+    # firmware travel guards: ch5 reaches 130.4 against a 130.0 limit and
+    # ch2 falls to 42.7 against 50.0. That is the direction that jammed a
+    # leg once already.
+    if not 0.0 <= config["stance_push_m"] <= 0.010:
+        raise ValueError("%s stance_push_m must be in [0, 0.010] m" % name)
 
     # The stance excursion the maximum command produces must stay inside the
     # foot workspace with margin (the IK sweep re-checks this exactly).
@@ -441,7 +646,7 @@ def _sweep_offsets(config, phase, velocity, leg):
         fraction = 0.5 - local / duty
         return excursion_x * fraction, excursion_y * fraction, 0.0, True
     progress = (local - duty) / (1.0 - duty)
-    fraction = -0.5 + smoothstep(progress)
+    fraction = swing_transfer(progress, duty)
     return (
         excursion_x * fraction,
         excursion_y * fraction,
@@ -469,11 +674,18 @@ def validate_servo_budget(config, speed_scale=1.0):
     mixed = limit_velocity_command(
         (limits[0], limits[1], limits[2]), limits
     )
+    # Yaw trim is added AFTER the combined-axis cap (so it never steals
+    # forward speed), which means the worst case for the servos is the
+    # gait's maximum forward command with the full trim on top -- a case
+    # the L1 cap would otherwise have rescaled away.  Sweep it explicitly.
+    trim = float(config.get("yaw_trim_limit_rad_s", 0.0))
     commands = (
         (limits[0], 0.0, 0.0),
         (0.0, limits[1], 0.0),
         (0.0, 0.0, limits[2]),
         mixed,
+        (limits[0], 0.0, trim),
+        (limits[0], 0.0, -trim),
     )
     period = config["cycle_period"]
     dt = _BUDGET_SWEEP_DT
@@ -493,7 +705,8 @@ def validate_servo_budget(config, speed_scale=1.0):
                 feet[leg] = (nominal[0] + dx, nominal[1] + dy, nominal[2] + dz)
                 stance_flags[leg] = stance
             positions, diagnostics = feet_to_joint_positions_diagnostic(
-                feet, height=_BUDGET_SWEEP_HEIGHT
+                feet,
+                height=_BUDGET_SWEEP_HEIGHT + stance_push_offset(config, phase),
             )
             if diagnostics["projected_targets"]:
                 raise ValueError(
@@ -598,6 +811,24 @@ def apply_real_tuning_to_configs(configs, tuning):
         config["max_x"] = stride / stance_time
     if lateral > 0.0 and stance_time > 0.0:
         config["max_y"] = lateral / stance_time
+    # The profile just rewrote cadence/duty/max_x, so the cadence law's
+    # derived values must follow or the loader will reject the result:
+    # stride_target_m has to stay equal to the full-command stride, and
+    # cadence_min_hz cannot exceed the new 1/cycle_period.
+    config["stride_target_m"] = (
+        config["max_x"] * config["hardware_speed_scale"]
+        * config["duty_factor"] * config["cycle_period"]
+    )
+    config["cadence_min_hz"] = min(
+        config["cadence_min_hz"], 1.0 / config["cycle_period"]
+    )
+    config["stride_floor_m"] = min(
+        config["stride_floor_m"], config["stride_target_m"]
+    )
+    if "command_acceleration" in tuning:
+        config["command_acceleration"] = float(tuning["command_acceleration"])
+    if "velocity_filter_alpha" in tuning:
+        config["velocity_filter_alpha"] = float(tuning["velocity_filter_alpha"])
     config = _validate_gait_config(name, {
         key: config[key] for key in GAIT_PARAMETER_NAMES
     } | {"type": name})
@@ -642,6 +873,12 @@ def _builtin_gaits():
             "joint_acceleration_limit_deg_s2": 6500.0,
             "stance_velocity_budget_deg_s": 80.0,
             "swing_velocity_budget_deg_s": 190.0,
+            "speed_scaled_cadence": False,
+            "stride_target_m": 0.04464,
+            "cadence_min_hz": 0.30,
+            "stride_floor_m": 0.0,
+            "yaw_trim_limit_rad_s": 0.15,
+            "stance_push_m": 0.008,
         }),
         # RUN: 0.80 Hz, the peak of the stride/cadence frontier. Faster
         # cadence shrinks the stride (the foot must cover it inside a shorter
@@ -649,21 +886,27 @@ def _builtin_gaits():
         "run": _validate_gait_config("run", {
             "type": "run",
             "cycle_period": 1.25,
-            "duty_factor": 0.50,
-            "step_height": 0.026,
+            "duty_factor": 0.48,
+            "step_height": 0.030,
             "max_x": 0.172,
             "max_y": 0.05,
             "max_yaw": 0.50,
             "settle_time": 0.6,
             "body_sway_y": 0.0,
             "body_height_offset": 0.0,
-            "velocity_filter_alpha": 0.30,
-            "command_acceleration": 0.10,
+            "velocity_filter_alpha": 0.22,
+            "command_acceleration": 0.07,
             "hardware_speed_scale": 0.80,
             "joint_velocity_limit_deg_s": 190.0,
             "joint_acceleration_limit_deg_s2": 6500.0,
             "stance_velocity_budget_deg_s": 80.0,
             "swing_velocity_budget_deg_s": 190.0,
+            "speed_scaled_cadence": True,
+            "stride_target_m": 0.08256,
+            "cadence_min_hz": 0.40,
+            "stride_floor_m": 0.050,
+            "yaw_trim_limit_rad_s": 0.0,
+            "stance_push_m": 0.0,
         }),
         "amble": _validate_gait_config("amble", {
             "type": "amble",
@@ -686,6 +929,12 @@ def _builtin_gaits():
             "joint_acceleration_limit_deg_s2": 6500.0,
             "stance_velocity_budget_deg_s": 80.0,
             "swing_velocity_budget_deg_s": 190.0,
+            "speed_scaled_cadence": False,
+            "stride_target_m": 0.0646,
+            "cadence_min_hz": 0.30,
+            "stride_floor_m": 0.0,
+            "yaw_trim_limit_rad_s": 0.15,
+            "stance_push_m": 0.0,
         }),
     }
 
@@ -792,6 +1041,7 @@ class VoltGaitController:
         self.stop_requested = False
         self.forced_stop = False
         self.phase = 0.0
+        self.cadence_hz = 1.0 / self.config["cycle_period"]
         self.feet = copy_feet(NOMINAL_FEET)
         self.world_feet = copy_feet(NOMINAL_FEET)
         self.body_x_world = 0.0
@@ -816,6 +1066,11 @@ class VoltGaitController:
             "warning": "",
             "body_world": {"x": 0.0, "y": 0.0, "yaw": 0.0},
             "planned_velocity": [0.0, 0.0, 0.0],
+            "cadence_hz": 1.0 / self.config["cycle_period"],
+            "configured_cycle_period": self.config["cycle_period"],
+            "resolved_stride_m": 0.0,
+            "duty_factor": self.config["duty_factor"],
+            "step_height": self.config["step_height"],
         }
 
     def set_current_feet(self, feet):
@@ -860,8 +1115,22 @@ class VoltGaitController:
         because the controller only calls this when the command stream is
         genuinely neutral.
         """
+        # Clearing the latch does NOT depend on the engine already being
+        # idle.  It used to, and that was a trap: the engine stays active
+        # for the rest of the swing plus settle_time after a release (up to
+        # ~2.5 s on RUN), so an operator who let go and pushed again inside
+        # that window left forced_stop latched forever -- the readout sat at
+        # "Phase 0 - STOPPED 0%" against a held stick until they released a
+        # second time and waited.  Measured trap windows before this fix:
+        # trot 0.05..0.95 s, run 0.05..2.45 s after release.
+        #
+        # The safety property is unchanged, because it never lived here: the
+        # caller only invokes this when the RAW command stream is genuinely
+        # neutral, so a held joystick still cannot clear a stop.  STOP keeps
+        # its separate AWAIT_NEUTRAL -> AWAIT_MOTION handshake in the motion
+        # controller, which this does not touch.
+        self.forced_stop = False
         if not self.active:
-            self.forced_stop = False
             self.stop_requested = False
 
     # -- world frame ------------------------------------------------------
@@ -949,8 +1218,15 @@ class VoltGaitController:
     def _touchdown_world(self, leg, velocity):
         """Frozen world-frame touchdown for the swing that starts now."""
         config = self.config
-        stance_time = config["duty_factor"] * config["cycle_period"]
-        swing_time = (1.0 - config["duty_factor"]) * config["cycle_period"]
+        # The live cadence, not the configured one: with speed-scaled cadence
+        # the cycle stretches at low command, and a touchdown planned from
+        # the configured period would land short by the same ratio.
+        period = 1.0 / max(
+            getattr(self, "cadence_hz", 0.0) or resolved_cadence(config, velocity),
+            1e-6,
+        )
+        stance_time = config["duty_factor"] * period
+        swing_time = (1.0 - config["duty_factor"]) * period
         vx, vy, wz = velocity
         nominal = NOMINAL_FEET[leg]
         # Foot velocity relative to the body during stance for this twist.
@@ -1015,7 +1291,10 @@ class VoltGaitController:
 
         self.last_velocity = velocity
         self.integrate_body_pose(velocity, dt)
-        self.phase += dt / max(self.config["cycle_period"], 1e-6)
+        # FREQUENCY carries the speed command; stride length is held near
+        # stride_target_m. See resolved_cadence().
+        self.cadence_hz = resolved_cadence(self.config, velocity)
+        self.phase += dt * self.cadence_hz
 
         feet = {}
         any_airborne = False
@@ -1112,10 +1391,15 @@ class VoltGaitController:
             )
         # No body_x/y_override keys: the operator offset passes through
         # unchanged (the consumer's .get default), the gait only adds sway.
+        height = config["body_height_offset"] if self.active else 0.0
+        if self.active and not self.settling:
+            # Positive = push the supporting pair taller. Only while a
+            # diagonal is airborne; zero again at the four-foot overlap.
+            height += stance_push_offset(config, self.phase % 1.0)
         return {
             "x": 0.0,
             "y": sway_y,
-            "height": config["body_height_offset"] if self.active else 0.0,
+            "height": height,
             "roll": 0.0,
             "pitch": 0.0,
         }
@@ -1147,7 +1431,20 @@ class VoltGaitController:
             "swing_legs": swing_legs,
             "stance_legs": [leg for leg in LEG_ORDER if leg not in swing_legs],
             "per_leg_phase": per_leg,
-            "cycle_period": self.config["cycle_period"],
+            # The LIVE values, not the configured ones: with speed-scaled
+            # cadence these are what the robot is actually doing.
+            "cycle_period": 1.0 / max(
+                getattr(self, "cadence_hz", 0.0)
+                or 1.0 / self.config["cycle_period"],
+                1e-6,
+            ),
+            "configured_cycle_period": self.config["cycle_period"],
+            "cadence_hz": getattr(
+                self, "cadence_hz", 1.0 / self.config["cycle_period"]
+            ),
+            "resolved_stride_m": resolved_stride(self.config, velocity),
+            "duty_factor": self.config["duty_factor"],
+            "step_height": self.config["step_height"],
             "warning": self.warning,
             "body_world": {
                 "x": self.body_x_world,

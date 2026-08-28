@@ -1,3 +1,23 @@
+# OPTIONAL PER-SERVO FIELD: deadband_deg (servo degrees, default 0.0).
+#
+# This is open-loop hardware -- nothing measures whether a servo actually
+# moved. An RC servo ignores a command change smaller than its own deadband,
+# and at low speed the per-frame steps here are well inside it: at a 20%
+# speed slider the stance hip advances 0.071 deg per frame against a
+# PCA9685 resolution step of 0.488 deg, so the pulse only changes every
+# ~7 frames and the servo sits in stiction between them. deadband_deg biases
+# the target in the direction of travel (smoothly, via tanh, so a joint
+# reversal does not step by 2x the value) to push it past that.
+#
+# It defaults to 0.0 on every channel, i.e. DISABLED, and it should stay
+# that way until measured: command one joint in steps of increasing size on
+# the bench and note where it first visibly moves. A guessed value shows up
+# as a standing position error that reverses sign with direction.
+#
+# Example:  front_left_leg:
+#             pca_channel: 1
+#             deadband_deg: 0.25
+
 joint_order:
   - front_left_shoulder
   - front_left_leg

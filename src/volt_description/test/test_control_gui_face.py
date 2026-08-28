@@ -315,10 +315,30 @@ class GuiLayoutTests(unittest.TestCase):
             containing_tab(window.pushup_travel_mm),
             window.main_tabs.widget(1),
         )
-        self.assertEqual(window.pushup_travel_mm.minimum(), 10.0)
-        self.assertEqual(window.pushup_travel_mm.maximum(), 60.0)
-        self.assertEqual(window.pushup_travel_mm.value(), 20.0)
+        self.assertEqual(
+            window.pushup_travel_mm.minimum(), gui.PUSHUP_TRAVEL_MIN_MM
+        )
+        self.assertEqual(
+            window.pushup_travel_mm.maximum(), gui.PUSHUP_TRAVEL_MAX_MM
+        )
+        # Operator-chosen startup values. Asserted against the constants so
+        # the test pins the intent rather than a literal that has to be
+        # chased every time the console is retuned.
+        self.assertEqual(
+            window.pushup_travel_mm.value(), gui.PUSHUP_TRAVEL_DEFAULT_MM
+        )
         self.assertEqual(window.pushup_travel_mm.singleStep(), 1.0)
+        self.assertEqual(window.emote_repetitions.value(), 1.0)
+        self.assertEqual(window.emote_speed.value(), 1.0)
+        self.assertEqual(window.emote_amplitude.value(), 2.0)
+        self.assertEqual(window.emote_depth.value(), 3.0)
+        # PUSH-UPS derive depth from travel (travel / PUSHUP_TRAVEL_BASE_MM),
+        # so the two defaults have to agree or the panel shows one number and
+        # sends another.
+        self.assertEqual(
+            window.emote_depth.value(),
+            gui.PUSHUP_TRAVEL_DEFAULT_MM / gui.PUSHUP_TRAVEL_BASE_MM,
+        )
         self.assertIs(containing_tab(window.face_status), window.main_tabs.widget(1))
         self.assertIs(
             containing_tab(window.apply_real_profile_button),

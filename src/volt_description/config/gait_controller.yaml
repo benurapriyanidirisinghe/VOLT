@@ -76,7 +76,36 @@ volt_motion_controller:
         type: trot
         cycle_period: 2.10
         duty_factor: 0.62
-        step_height: 0.020
+        # 34 mm, and the reason is the DROOP, not the trajectory.
+        #
+        # Observed on hardware: in a trot the robot stands on the diagonal
+        # pair, those two legs visibly bend under the whole 52 N, and the
+        # swinging pair drags along the floor without ever floating.
+        #
+        # Nothing in software reduces the lift -- all four feet are commanded
+        # a full step_height above the planted ones, verified end to end. The
+        # body simply drops out from under them: measured droop is ~18 mm
+        # against what was a 20 mm command, leaving ~2 mm of real clearance,
+        # which is a drag. Real clearance = step_height - droop, so:
+        #
+        #     20 mm ->  2 mm   (drags, this is what was happening)
+        #     30 mm -> 12 mm
+        #     34 mm -> 16 mm   <- here
+        #     40 mm -> 22 mm   (budget still OK at 159 of 190 deg/s)
+        #
+        # 34 mm costs 144 deg/s of swing against a 190 budget, and it does
+        # NOT move the firmware guards: ch2's minimum shifts 46.50 -> 46.58
+        # across the entire 20..40 mm range, because that minimum happens at
+        # touchdown, not during the lift.
+        #
+        # An earlier attempt at 30 mm was reverted, but it was bundled with
+        # speed-scaled cadence in the same change and the cadence law is what
+        # broke the trot. The lift is isolated this time.
+        #
+        # This is compensation, not a cure. The cure is less droop: a
+        # taller stance shortens the knee moment arm (1.855 -> 1.317 N.m at
+        # 0.210 m), which is the open item.
+        step_height: 0.034
         # max_x is set by the STANCE joints, not the swing ones. Stance joints
         # carry the load, so their speed ceiling comes from the servo's
         # speed-torque curve: at 0.210 m the knee runs at 75% of usable stall,
@@ -96,6 +125,32 @@ volt_motion_controller:
         joint_acceleration_limit_deg_s2: 6500.0
         stance_velocity_budget_deg_s: 80.0
         swing_velocity_budget_deg_s: 190.0
+        # Speed-scaled cadence is OFF for the trot: it made the trot walk
+        # worse on hardware and the trot is reverted to the fixed 2.10 s
+        # cycle it had before. The law is still available (see
+        # resolved_cadence) and the reasoning behind it stands -- a 20.8 mm
+        # stride at the default slider is under the 29.6 mm that "ran on the
+        # spot" -- but a stretched cycle is evidently not how this gait wants
+        # to solve that. If the small-stride problem is worth attacking here
+        # again, raise cadence_min_hz first so the cycle never stretches far,
+        # and record one slider setting per rung.
+        speed_scaled_cadence: false
+        stride_target_m: 0.08333
+        cadence_min_hz: 0.24
+        stride_floor_m: 0.0
+        # Yaw trim: an ADDITIVE heading bias on wz, in rad/s, applied AFTER
+        # the combined-axis cap so it can never reduce forward speed. It is
+        # not scaled by the speed slider and never touches vx/vy.
+        yaw_trim_limit_rad_s: 0.15
+        # STANCE PUSH: extend the supporting diagonal while the other pair
+        # is airborne, so the body is held up exactly when it would be
+        # sinking onto two feet. 8 mm, and 8 mm is the ceiling -- at 12 mm
+        # the front knees leave the firmware guards (ch5 130.4 vs 130.0,
+        # ch2 42.7 vs 50.0), which is the direction that jammed a leg once.
+        # Measured cost at 8 mm: stance rate 28 -> 36 deg/s of an 80 budget,
+        # and swing rate DROPS 136 -> 115, because a foot lifting away from
+        # a rising body has less height to make up on its own.
+        stance_push_m: 0.008
 
       # Four-beat lateral-sequence amble (RL, FL, RR, FR a quarter cycle
       # apart). duty 0.76 keeps three feet planted at all times; body_sway_y
@@ -118,61 +173,141 @@ volt_motion_controller:
         joint_acceleration_limit_deg_s2: 6500.0
         stance_velocity_budget_deg_s: 80.0
         swing_velocity_budget_deg_s: 190.0
+        # The amble is the load-safe diagnostic gait and keeps a fixed
+        # cadence deliberately: it is the gait used to compare runs against
+        # each other, so its timing must not move with the command.
+        speed_scaled_cadence: false
+        stride_target_m: 0.0646
+        cadence_min_hz: 0.30
+        stride_floor_m: 0.0
+        yaw_trim_limit_rad_s: 0.15
+        # Three feet are planted throughout an amble, so the sag this
+        # compensates is much smaller; left off to keep the diagnostic
+        # baseline comparable across runs.
+        stance_push_m: 0.0
 
       # RUN: a fast trot. "Fast" means fast OVER GROUND, which is not the
-      # same as fast cadence -- and on this robot they pull in opposite
-      # directions.
+      # same as fast cadence -- on this robot they pull in opposite
+      # directions, because
       #
-      # stride = max_x * hardware_speed_scale * duty * cycle_period, so
-      # raising cadence shrinks the stride unless max_x rises to compensate.
-      # It cannot rise freely: validate_servo_budget caps it because the foot
-      # has to cover the stride within the stance window. The frontier, at
-      # duty 0.50, largest stride the budget accepts:
+      #     stride = max_x * hardware_speed_scale * duty * cycle_period
       #
-      #     0.48 Hz -> 113 mm, 0.241 BL/s
-      #     0.60 Hz -> 105 mm, 0.280 BL/s
-      #     0.70 Hz ->  95 mm, 0.294 BL/s
-      #     0.80 Hz ->  86 mm, 0.304 BL/s   <- peak speed over ground
-      #     1.00 Hz ->  55 mm, 0.244 BL/s
-      #     1.30 Hz ->  42 mm, 0.241 BL/s
+      # so raising cadence shrinks the stride unless max_x rises, and max_x
+      # cannot rise freely: validate_servo_budget caps it because the foot
+      # must cover the stride within the stance window.
       #
       # The first RUN shipped at 1.30 Hz with max_x set to the trot's x1.2,
-      # which produced a 29.6 mm stride against the trot's 83.3 -- steps
-      # nearly three times SMALLER at nearly three times the cadence. Tiny
-      # steps lose entirely to stance slip, so the robot ran on the spot.
-      # That was a parameter error: "+20% stride" was applied to the velocity
-      # limit rather than to the stride.
+      # producing a 29.6 mm stride against the trot's 83.3 -- steps three
+      # times SMALLER at three times the cadence, which loses entirely to
+      # stance slip, so the robot ran on the spot. That was a parameter
+      # error: "+20% stride" was applied to the velocity limit, not the
+      # stride.
       #
-      # 0.80 Hz sits at the peak: 1.7x the trot's cadence, a slightly longer
-      # stride than the trot's 83.3 mm, and 1.7x its speed over ground. Note
-      # the frontier is computed against BOTH envelopes load_gait_configs
-      # enforces -- the unscaled command limit binds first, and checking only
-      # the hardware-scaled one overstates every rung.
+      # GUARD CORRECTION. Every frontier number previously recorded here was
+      # computed with a validator that swept the WRONG TRAJECTORY. It swept
+      # the body-frame helper, whose swing transfer is a plain smoothstep
+      # with zero end velocity; the live engine interpolates the swing foot
+      # in the WORLD frame, which body-relative is a different cubic whose
+      # end velocities match the stance foot (see swing_transfer()). The
+      # live shape is the correct one -- it is why the foot lands without
+      # scuffing -- but it is faster through mid-swing, so the guard was
+      # understating peak commanded swing rate by ~10%. Measured, straight
+      # ahead, at each gait's max_x:
       #
-      # Cadence is the ladder to walk UP from here (0.80 -> 1.00 -> 1.30),
-      # one recording per rung, stopping at the last rung where travel per
-      # stride has not collapsed. Duty ladders DOWN separately (0.50 -> 0.47
-      # -> 0.45) toward a flight phase.
+      #                       guard said   actually commanded
+      #     trot   swing         100            108
+      #     amble  swing         141            145
+      #     run    swing         173            190   <- the whole budget
       #
-      # Clearance is still the open question for RUN, but it is no longer a
-      # stall-torque question: see the correction on the trot above. What
-      # remains is servo compliance (proportional-band droop under load) and
-      # stance traction.
+      # The helper now uses swing_transfer(), so guard and engine agree.
+      # A consequence worth keeping: the RUN the operator has already run
+      # successfully on hardware was commanding 169 deg/s peak swing, not
+      # the 156 the old guard reported. 169 is therefore DEMONSTRATED, and
+      # is the highest swing rate this robot is known to tolerate.
+      #
+      # TUNING, at 26 mm lift. Cadence -- not stride -- sets the swing rate:
+      # at 0.90 Hz the peak moves only 177 -> 188 across the entire usable
+      # max_x range, so shrinking the stride buys almost no margin. Speed
+      # and swing margin are therefore directly coupled, and there is no
+      # retune that is both faster and gentler on the swing servo:
+      #
+      #     0.80 Hz duty 0.50 max_x 0.172 -> 86.0 mm, 0.304 BL/s, swing 169
+      #     0.85 Hz duty 0.52 max_x 0.172 -> 84.2 mm, 0.317 BL/s, swing 182
+      #     0.90 Hz duty 0.52 max_x 0.176 -> 81.4 mm, 0.324 BL/s, swing 188
+      #
+      # Shipped: the 0.90 Hz point, +7% over ground. Two things pay for the
+      # swing rate it costs. duty 0.52 rather than 0.50 gives 4% of the
+      # cycle with all four feet down; at duty 0.50 the diagonal handoff is
+      # instantaneous, so any timing jitter leaves a moment on one foot.
+      # And the command shaping below is softened, which costs no stride at
+      # all. Joint ACCELERATION is not a constraint anywhere here: peak 3073
+      # deg/s2 against a 6500 limit.
+      #
+      # 188 is 99% of the assumed 190 budget but only 78% of the firmware's
+      # 240 slew ceiling, and 190 was always an assumption. TEST IT RAISED
+      # FIRST. Lift stays at 26 mm deliberately -- rear-foot clearance is an
+      # open failure, and dropping to 22 mm would buy back 15 deg/s of swing
+      # margin at zero speed cost but attack the clearance directly.
+      #
+      # SPEED LADDER beyond this point. RUN is limited by these budgets, not
+      # by the servos or the firmware. Raising the STANCE budget is what
+      # unlocks more, because stance rate scales with commanded velocity:
+      #
+      #     stance 80,  swing 190  -> 0.324 BL/s   (today)
+      #     stance 95,  swing 190  -> 0.354 BL/s   (+9%)
+      #     stance 110, swing 215  -> 0.361 BL/s   (+11%)
+      #
+      # Walk that as a LADDER with a recording per rung. The linear
+      # speed-torque model is not a safe basis for guessing ahead: at the
+      # measured stall it predicts ~50 deg/s available on stance, which the
+      # robot already exceeds, so the model is known wrong in this regime.
+      #
+      # Clearance remains open, but it is no longer a stall-torque question
+      # (see the correction on the trot). Servo compliance and stance
+      # traction are what is left.
       run:
         type: run
+        # 0.80 Hz / duty 0.48 / 30 mm lift. Three things at once:
+        #   - duty below 0.50, which is what makes a run a run rather than a
+        #     fast trot (4% four-foot overlap -> 0%, a true two-beat).
+        #   - 30 mm of clearance instead of 26, against ~18 mm of droop.
+        #   - peak swing 171 of a 190 budget (90%) instead of 188 (99%).
+        # It costs 10% of top speed: 0.292 BL/s against 0.324. The margin is
+        # worth more than the 10% -- 99% of budget is where a servo stops
+        # tracking its command and the foot snaps at touchdown.
         cycle_period: 1.25
-        duty_factor: 0.50
-        step_height: 0.026
+        duty_factor: 0.48
+        step_height: 0.030
         max_x: 0.172
         max_y: 0.05
         max_yaw: 0.50
         settle_time: 0.6
         body_sway_y: 0.0
         body_height_offset: 0.0
-        velocity_filter_alpha: 0.30
-        command_acceleration: 0.10
+        # Softened from 0.30/0.10. Both shape how the COMMAND moves, not
+        # the stride, so this is smoothness at no cost in speed: less
+        # jitter passed through to the legs at cadence, and a gentler
+        # ramp entering and leaving the run.
+        velocity_filter_alpha: 0.22
+        command_acceleration: 0.07
         hardware_speed_scale: 0.80
         joint_velocity_limit_deg_s: 190.0
         joint_acceleration_limit_deg_s2: 6500.0
         stance_velocity_budget_deg_s: 80.0
         swing_velocity_budget_deg_s: 190.0
+        speed_scaled_cadence: true
+        stride_target_m: 0.08256
+        cadence_min_hz: 0.40
+        stride_floor_m: 0.050
+        # RUN gets ZERO, not the 0.15 the other gaits carry, and this is a
+        # MEASURED ceiling rather than a preference: RUN already commands
+        # 188 deg/s of peak swing against a 190 budget at full speed, so
+        # there is no headroom to bias into -- even 0.02 rad/s pushes a
+        # stance joint to exactly the 80 deg/s budget. Trot and amble both
+        # accept 0.25. Steer RUN with the stick; if a trim is needed here,
+        # the swing budget has to be raised first (see the SPEED LADDER).
+        yaw_trim_limit_rad_s: 0.0
+        # Off for now: RUN has no four-foot overlap at duty 0.48, so the
+        # push would never return to zero, and its swing budget is the
+        # tightest of the three. Revisit once the trot's push is proven.
+        stance_push_m: 0.0

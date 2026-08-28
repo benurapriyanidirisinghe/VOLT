@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import volt_serial_protocol as protocol
 from volt_serial_protocol import (
     _STATUS_FIELD,
     BINARY_FRAME_MAGIC,
@@ -700,3 +702,55 @@ class BinaryFrameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirmwareGuardMirrorTests(unittest.TestCase):
+    """The host mirror of the firmware travel guard must not drift."""
+
+    @staticmethod
+    def _firmware_table(name):
+        source = (
+            Path(__file__).resolve().parents[3]
+            / "firmware" / "volt_arduino_pca9685"
+            / "volt_arduino_pca9685.ino"
+        ).read_text()
+        match = re.search(
+            r"const float %s\[CHANNEL_COUNT\] = \{(.*?)\};" % name,
+            source,
+            re.S,
+        )
+        assert match, "%s not found in the firmware" % name
+        return tuple(
+            float(value)
+            for value in re.findall(r"-?\d+\.?\d*", match.group(1))
+        )
+
+    def test_mirror_matches_the_firmware_tables(self):
+        """A silent clamp is only visible if the mirror stays in sync.
+
+        The firmware clamps to these and reports nothing back, so the host
+        copy is the only way an operator learns that commanded travel is
+        being discarded. If someone edits the .ino and not this table, the
+        guard goes invisible again -- which is how the front-right knee
+        clip stayed hidden.
+        """
+        self.assertEqual(
+            self._firmware_table("CHANNEL_MIN_DEG"),
+            protocol.FIRMWARE_CHANNEL_MIN_DEG,
+        )
+        self.assertEqual(
+            self._firmware_table("CHANNEL_MAX_DEG"),
+            protocol.FIRMWARE_CHANNEL_MAX_DEG,
+        )
+
+    def test_detects_the_front_right_knee_clip(self):
+        """ch2 below 50 deg is the measured trot/run clip at full stride."""
+        frame = [90.0] * 12
+        frame[2] = 46.5
+        clips = protocol.firmware_guard_clips(frame)
+        self.assertEqual([(2, 46.5, 50.0)], clips)
+
+    def test_clean_frame_reports_nothing(self):
+        frame = [90.0] * 12
+        frame[2] = 54.0
+        self.assertEqual([], protocol.firmware_guard_clips(frame))

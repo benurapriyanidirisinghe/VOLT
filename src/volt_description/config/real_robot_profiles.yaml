@@ -24,6 +24,8 @@ profiles:
     smoothing_amount: 0.0
     touchdown_softness: 0.18
     stance_width: 0.104
+    command_acceleration: 0.08
+    velocity_filter_alpha: 0.30
 
   # First loaded-floor profile: lateral-sequence amble, one leg at a time,
   # three feet always planted, small stride, bounded servo dynamics.
@@ -64,6 +66,8 @@ profiles:
     smoothing_amount: 0.15
     touchdown_softness: 0.30
     stance_width: 0.104
+    command_acceleration: 0.06
+    velocity_filter_alpha: 0.25
 
   REAL_SAFE:
     gait: trot
@@ -83,6 +87,8 @@ profiles:
     smoothing_amount: 0.12
     touchdown_softness: 0.28
     stance_width: 0.104
+    command_acceleration: 0.08
+    velocity_filter_alpha: 0.30
 
   REAL_NORMAL:
     gait: trot
@@ -102,3 +108,5 @@ profiles:
     smoothing_amount: 0.10
     touchdown_softness: 0.24
     stance_width: 0.104
+    command_acceleration: 0.08
+    velocity_filter_alpha: 0.30

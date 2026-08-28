@@ -150,6 +150,52 @@ def format_frame_command(values):
 # STATUS), because printing an error per corrupt frame is itself the timing
 # hazard that corrupts the next frame.
 
+# Host-side mirror of the firmware's per-channel travel guards
+# (CHANNEL_MIN_DEG / CHANNEL_MAX_DEG in volt_arduino_pca9685.ino).
+#
+# The firmware clamps silently -- it sends nothing back to say a channel was
+# truncated -- so without this mirror a guard that eats commanded motion is
+# invisible to the operator. That is how the front-right knee guard on ch2
+# went unnoticed: at any stride over ~61 mm it holds that one knee at 50 deg
+# while the gait asks for 46.5, so the front-right foot lands 3.5 deg short
+# on every stride and no software layer says a word.
+#
+# test_serial_protocol.py parses the .ino and asserts these match, so the
+# mirror cannot drift from the firmware it mirrors.
+FIRMWARE_CHANNEL_MIN_DEG = (
+    70.0, 0.0, 50.0,
+    70.0, 0.0, 30.0,
+    50.0, 0.0, 30.0,
+    50.0, 0.0, 0.0,
+)
+FIRMWARE_CHANNEL_MAX_DEG = (
+    160.0, 180.0, 150.0,
+    160.0, 180.0, 130.0,
+    140.0, 180.0, 180.0,
+    140.0, 180.0, 150.0,
+)
+
+
+def firmware_guard_clips(frame, tolerance=0.05):
+    """Channels this frame would have silently truncated in firmware.
+
+    Returns a list of (channel, commanded_deg, guard_deg). ``tolerance``
+    ignores clips smaller than the PCA9685's own 0.488 deg resolution step,
+    which are not physically distinguishable anyway.
+    """
+    clips = []
+    for channel, value in enumerate(frame):
+        if channel >= len(FIRMWARE_CHANNEL_MIN_DEG):
+            break
+        low = FIRMWARE_CHANNEL_MIN_DEG[channel]
+        high = FIRMWARE_CHANNEL_MAX_DEG[channel]
+        if value < low - tolerance:
+            clips.append((channel, float(value), low))
+        elif value > high + tolerance:
+            clips.append((channel, float(value), high))
+    return clips
+
+
 BINARY_FRAME_MAGIC = 0xA5
 BINARY_PROTOCOL_MIN_VERSION = 3
 

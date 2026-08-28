@@ -24,6 +24,9 @@ class ServoCalibration:
     max_deg: float
     min_pulse_us: int
     max_pulse_us: int
+    # Smallest command change that actually breaks this servo's static
+    # friction, in servo degrees. See deadband_feedforward().
+    deadband_deg: float = 0.0
 
 
 def _finite_float(value, field, joint_name):
@@ -90,6 +93,14 @@ class ServoCalibrationTable:
             max_deg = _finite_float(entry.get("max_deg"), "max_deg", joint_name)
             min_pulse = _int_value(entry.get("min_pulse_us"), "min_pulse_us", joint_name)
             max_pulse = _int_value(entry.get("max_pulse_us"), "max_pulse_us", joint_name)
+            deadband = _finite_float(
+                entry.get("deadband_deg", 0.0), "deadband_deg", joint_name
+            )
+            if not 0.0 <= deadband <= 3.0:
+                raise CalibrationError(
+                    "%s deadband_deg must be in [0, 3] servo degrees"
+                    % joint_name
+                )
 
             if not 0 <= channel <= 15:
                 raise CalibrationError("%s pca_channel must be 0..15" % joint_name)
@@ -120,6 +131,7 @@ class ServoCalibrationTable:
                 max_deg=max_deg,
                 min_pulse_us=min_pulse,
                 max_pulse_us=max_pulse,
+                deadband_deg=deadband,
             )
 
         if len(channels) != len(set(channels)):
@@ -179,6 +191,33 @@ class ServoCalibrationTable:
         if any(value is None for value in frame):
             raise CalibrationError("incomplete channel frame")
         return frame, details
+
+
+def deadband_feedforward(delta_deg, deadband_deg):
+    """Bias a commanded step in its direction of travel, smoothly.
+
+    This is open-loop hardware: nothing measures whether a servo actually
+    moved.  An RC servo does not respond to a command change smaller than
+    its own deadband, and at low speed the per-frame steps here are well
+    inside it -- at a 20% speed slider the stance hip advances 0.071 deg per
+    frame against a PCA9685 resolution step of 0.488 deg, so the pulse only
+    changes every ~7 frames and the servo sits in stiction between them.
+    Biasing the target in the direction of travel pushes it past that.
+
+    tanh rather than a signed constant on purpose: a hard ``+d * sign(delta)``
+    steps by 2*d every time a joint reverses, which on a leg joint happens
+    twice per stride and would inject exactly the jerk this is meant to
+    remove.  tanh saturates at +-deadband, passes through zero, and has no
+    discontinuity anywhere.
+
+    NOTE the default is 0.0 for every joint, i.e. disabled.  The right value
+    is a MEASUREMENT -- command a joint in steps of increasing size and note
+    where it first visibly moves -- not a guess, and a wrong one shows up as
+    a standing position error that reverses sign with direction.
+    """
+    if deadband_deg <= 0.0:
+        return 0.0
+    return deadband_deg * math.tanh(delta_deg / deadband_deg)
 
 
 def ordered_positions_from_joint_state(message):

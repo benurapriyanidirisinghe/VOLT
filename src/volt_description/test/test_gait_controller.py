@@ -454,3 +454,174 @@ class ServoBudgetRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuardEngineAgreementTests(unittest.TestCase):
+    """The servo guard must sweep the trajectory the engine actually flies."""
+
+    DT = gait_module._BUDGET_SWEEP_DT
+
+    @staticmethod
+    def peak_swing(positions, flags, dt):
+        peak = 0.0
+        for index in range(1, len(positions)):
+            for joint in range(12):
+                leg = "_".join(JOINT_NAMES[joint].split("_")[:2])
+                if flags[index][leg] and flags[index - 1][leg]:
+                    continue
+                delta = positions[index][joint] - positions[index - 1][joint]
+                peak = max(peak, abs(delta) / dt * 180.0 / math.pi)
+        return peak
+
+    def test_swing_transfer_matches_stance_end_velocity(self):
+        """Body-frame swing must leave and arrive at the stance foot's speed.
+
+        Plain smoothstep has zero end velocity, which is a different
+        trajectory from the one the world-frame engine flies.
+        """
+        step = 1e-6
+        for duty in (0.50, 0.52, 0.62, 0.76):
+            expected = -(1.0 - duty) / duty
+            start = (gait_module.swing_transfer(step, duty)
+                     - gait_module.swing_transfer(0.0, duty)) / step
+            end = (gait_module.swing_transfer(1.0, duty)
+                   - gait_module.swing_transfer(1.0 - step, duty)) / step
+            self.assertAlmostEqual(start, expected, places=3)
+            self.assertAlmostEqual(end, expected, places=3)
+            self.assertAlmostEqual(
+                gait_module.swing_transfer(0.0, duty), -0.5, places=9)
+            self.assertAlmostEqual(
+                gait_module.swing_transfer(1.0, duty), 0.5, places=9)
+
+    def test_guard_does_not_understate_the_live_engine(self):
+        """Regression: the guard swept a body-frame helper while the engine
+        ran a world-frame integrator, reporting 173 deg/s of peak swing on
+        RUN where the engine commands 190 -- the whole budget presented as
+        17 deg/s of headroom."""
+        configs = load_gait_configs()
+        dt = self.DT
+        for name in ("trot", "amble", "run"):
+            config = configs[name]
+            command = (config["max_x"], 0.0, 0.0)
+            samples = max(int(config["cycle_period"] / dt), 40)
+
+            swept, swept_flags = [], []
+            for index in range(samples + 1):
+                phase = (index * dt) / config["cycle_period"]
+                feet, flags = {}, {}
+                for leg in LEG_ORDER:
+                    dx, dy, dz, stance = gait_module._sweep_offsets(
+                        config, phase, command, leg)
+                    nominal = NOMINAL_FEET[leg]
+                    feet[leg] = (nominal[0] + dx, nominal[1] + dy,
+                                 nominal[2] + dz)
+                    flags[leg] = stance
+                swept.append(feet_to_joint_positions_diagnostic(
+                    feet, height=gait_module._BUDGET_SWEEP_HEIGHT)[0])
+                swept_flags.append(flags)
+
+            engine = VoltGaitController(gait_configs=configs)
+            engine.set_gait(name, 0.0)
+            now = 0.0
+            warmup = int(
+                (config["settle_time"] + config["cycle_period"]) / dt) + 20
+            for _ in range(warmup):
+                engine.step(now, dt, command)
+                now += dt
+            live, live_flags = [], []
+            for _ in range(samples + 1):
+                feet, _motion, _active = engine.step(now, dt, command)
+                now += dt
+                live.append(feet_to_joint_positions_diagnostic(
+                    feet, height=gait_module._BUDGET_SWEEP_HEIGHT)[0])
+                live_flags.append({
+                    leg: engine._swing_progress(leg) is None
+                    for leg in LEG_ORDER})
+
+            swept_peak = self.peak_swing(swept, swept_flags, dt)
+            live_peak = self.peak_swing(live, live_flags, dt)
+            self.assertGreaterEqual(
+                swept_peak, live_peak * 0.97,
+                "%s: guard sweeps %.0f deg/s but the engine commands %.0f"
+                % (name, swept_peak, live_peak))
+
+    def test_run_is_faster_over_ground_than_trot(self):
+        """RUN must travel faster, not merely step more often."""
+        configs = load_gait_configs()
+
+        def speed(config):
+            stride = (config["max_x"] * config["hardware_speed_scale"]
+                      * config["duty_factor"] * config["cycle_period"])
+            return stride / config["cycle_period"], stride
+
+        run_speed, run_stride = speed(configs["run"])
+        trot_speed, trot_stride = speed(configs["trot"])
+        self.assertGreater(run_speed, trot_speed * 1.5)
+        # The pace failure mode: high cadence with a collapsed stride.
+        self.assertGreater(run_stride, trot_stride * 0.9)
+
+
+class StancePushTests(unittest.TestCase):
+    """The supporting pair is pushed up while the other diagonal swings."""
+
+    def test_push_is_zero_at_four_foot_overlap_and_peaks_mid_swing(self):
+        config = load_gait_configs()["trot"]
+        self.assertGreater(config["stance_push_m"], 0.0)
+        duty = config["duty_factor"]
+        # A phase where every foot is planted: both diagonals inside stance.
+        overlap = [
+            phase / 1000.0
+            for phase in range(1000)
+            if gait_module.swing_phase_progress(config, phase / 1000.0) is None
+        ]
+        self.assertTrue(overlap, "a trot at duty>0.5 must have four-foot overlap")
+        for phase in overlap:
+            self.assertEqual(
+                0.0, gait_module.stance_push_offset(config, phase)
+            )
+        peak = max(
+            gait_module.stance_push_offset(config, phase / 1000.0)
+            for phase in range(1000)
+        )
+        self.assertAlmostEqual(peak, config["stance_push_m"], places=4)
+
+    def test_push_has_zero_slope_at_both_ends(self):
+        """No step in commanded body height at liftoff or touchdown."""
+        config = dict(load_gait_configs()["trot"])
+        step = 1e-5
+        for progress in (0.0, 1.0):
+            near = gait_module.swing_lift(progress, 1.0)
+            self.assertAlmostEqual(near, 0.0, places=6)
+        # The push shares swing_lift's sin^2 shape, so sample its ends via
+        # the phase that maps to swing progress 0 and 1.
+        duty = config["duty_factor"]
+        self.assertAlmostEqual(
+            gait_module.stance_push_offset(config, duty), 0.0, places=6
+        )
+
+    def test_engine_reports_the_push_in_body_motion(self):
+        configs = load_gait_configs()
+        engine = VoltGaitController(gait_configs=configs)
+        engine.set_gait("trot", 0.0)
+        limits = engine.command_limits()
+        velocity = (limits[0], 0.0, 0.0)
+        now, dt = 0.0, 0.01
+        heights = []
+        for _ in range(int(6.0 / dt)):
+            now += dt
+            _feet, body, _active = engine.step(now, dt, velocity)
+            heights.append(body["height"])
+        self.assertGreater(
+            max(heights), 0.0,
+            "the trot must command a positive body-height push",
+        )
+        self.assertLessEqual(max(heights), configs["trot"]["stance_push_m"] + 1e-9)
+
+    def test_push_is_bounded_by_the_firmware_travel_guards(self):
+        """Past ~10 mm the front knees leave CHANNEL_MIN/MAX_DEG."""
+        config = dict(load_gait_configs()["trot"])
+        config["stance_push_m"] = 0.011
+        with self.assertRaises(ValueError):
+            gait_module._validate_gait_config("trot", {
+                key: config[key] for key in gait_module.GAIT_PARAMETER_NAMES
+            } | {"type": "trot"})

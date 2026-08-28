@@ -6,7 +6,7 @@ import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray, String
+from std_msgs.msg import Float64, Float64MultiArray, String
 
 from volt_gait_controller import (
     GAITS,
@@ -16,6 +16,7 @@ from volt_gait_controller import (
     default_gait_config_path,
     limit_velocity_command,
     load_gait_configs,
+    minimum_speed_for_stride,
     normalized_velocity_activity,
 )
 from volt_kinematics import (
@@ -326,6 +327,12 @@ class VoltMotionController(Node):
             10,
         )
         self.create_subscription(Twist, "/cmd_vel", self.velocity_callback, 10)
+        self.create_subscription(
+            Float64,
+            "/volt/yaw_trim",
+            self.yaw_trim_callback,
+            10,
+        )
         self.create_subscription(String, "/volt/action", self.action_callback, 10)
         self.create_subscription(String, "/volt/gait", self.gait_callback, 10)
         self.create_subscription(
@@ -385,6 +392,12 @@ class VoltMotionController(Node):
         )
         self.requested_gait = self.gait_name
         self.step_in_place = False
+        # Additive heading bias, rad/s. Deliberately NOT part of the Twist:
+        # sharing angular.z would put it inside limit_velocity_command's
+        # combined-axis cap, which rescales vx -- the exact behaviour the
+        # trim is required not to have.
+        self.yaw_trim = 0.0
+        self.yaw_trim_clipped = False
         self.last_step_keepalive_time = self.now_seconds()
         self.requested_velocity = [0.0, 0.0, 0.0]
         self.filtered_velocity = [0.0, 0.0, 0.0]
@@ -667,6 +680,13 @@ class VoltMotionController(Node):
             # for the low-pass velocity to decay could otherwise authorize an
             # extra stride after the joystick was released.
             self.gait_controller.request_stop()
+
+    def yaw_trim_callback(self, message):
+        """Accept an additive heading bias, clamped to the gait's headroom."""
+        value = float(message.data)
+        if not math.isfinite(value):
+            return
+        self.yaw_trim = value
 
     def gait_callback(self, message):
         requested = canonical_gait_name(message.data)
@@ -3161,6 +3181,23 @@ class VoltMotionController(Node):
         # engine's servo-budget validation assumed, so a joystick pushing
         # every axis at once cannot exceed the validated mixed command.
         desired = list(limit_velocity_command(desired, limits))
+        # Yaw trim is applied AFTER the cap, on the yaw axis only, so it can
+        # never reduce vx or vy -- a trim is a heading bias, not a command.
+        # It is also not scaled by the speed slider.  Its per-gait ceiling
+        # is budget-validated (validate_servo_budget sweeps max_x with the
+        # full trim on top), and it only biases a command that already
+        # exists, so a parked trim cannot make the robot move on its own.
+        trim_limit = float(gait.get("yaw_trim_limit_rad_s", 0.0))
+        raw_trim = float(getattr(self, "yaw_trim", 0.0))
+        requested_trim = clamp(raw_trim, -trim_limit, trim_limit)
+        self.yaw_trim_clipped = abs(raw_trim) > trim_limit + 1e-9
+        if requested_trim and (
+            abs(desired[0]) > 1e-9 or abs(desired[1]) > 1e-9
+        ):
+            yaw_ceiling = limits[2] + trim_limit
+            desired[2] = clamp(
+                desired[2] + requested_trim, -yaw_ceiling, yaw_ceiling
+            )
         acceleration = float(gait["command_acceleration"]) * speed_scale
         rates = [
             max(0.01, acceleration),
@@ -3187,16 +3224,32 @@ class VoltMotionController(Node):
             # denormals (observed 5e-324 in status) and never reaches rest.
             if abs(self.filtered_velocity[index]) < 1e-6:
                 self.filtered_velocity[index] = 0.0
-        if (
-            not self.gait_controller.active
-            and self.velocity_is_neutral(self.requested_velocity)
-            and all(abs(value) < 1e-6 for value in self.filtered_velocity)
-        ):
+        # A genuine neutral from the operator releases the safety latch,
+        # whether or not the engine has finished settling.  Waiting for
+        # `not active` and a fully decayed filter meant a release-and-repush
+        # inside the settle window latched the gait off permanently.
+        if self.velocity_is_neutral(self.requested_velocity):
             release = getattr(
                 self.gait_controller, "release_forced_stop", None
             )
             if callable(release):
                 release()
+
+    def speed_floor_fraction(self, gait_name):
+        """Fraction of max_x below which the stride drops under the floor.
+
+        Below cadence_min_hz the cycle cannot stretch any further, so the
+        stride starts shrinking with the command again and the robot walks
+        back into the slip band the cadence law exists to avoid.  The GUI
+        uses this to place the speed slider's minimum.
+        """
+        gait = self.gait_configs[gait_name]
+        floor = float(gait.get("stride_floor_m", 0.0))
+        if floor <= 0.0:
+            return 0.0
+        speed = minimum_speed_for_stride(gait, floor)
+        full = gait["max_x"] * self.active_speed_scale(gait)
+        return clamp(speed / max(full, 1e-9), 0.0, 1.0)
 
     def active_speed_scale(self, gait=None):
         """Return the active gait's backend command scale."""
@@ -3860,6 +3913,47 @@ class VoltMotionController(Node):
             ),
             "lift_allowed": debug.get("lift_allowed", False),
             "resolved_gait": self.resolved_gait_summary(self.gait_name),
+            # Live command-path telemetry: what was asked, what survived the
+            # clamps, and what the engine resolved it into.
+            "commanded_velocity": list(self.requested_velocity),
+            "clamped_velocity": list(self.filtered_velocity),
+            "yaw_trim": float(getattr(self, "yaw_trim", 0.0)),
+            "yaw_trim_limit": float(
+                self.gait_configs[self.gait_name].get(
+                    "yaw_trim_limit_rad_s", 0.0
+                )
+            ),
+            "yaw_trim_clipped": bool(getattr(self, "yaw_trim_clipped", False)),
+            "cadence_hz": debug.get("cadence_hz", 0.0),
+            "configured_cycle_period": debug.get(
+                "configured_cycle_period",
+                self.gait_configs[self.gait_name]["cycle_period"],
+            ),
+            "resolved_stride_m": debug.get("resolved_stride_m", 0.0),
+            "duty_factor": debug.get(
+                "duty_factor",
+                self.gait_configs[self.gait_name]["duty_factor"],
+            ),
+            "step_height": debug.get(
+                "step_height",
+                self.gait_configs[self.gait_name]["step_height"],
+            ),
+            "swing_height_mm": {
+                leg: round(
+                    max(
+                        0.0,
+                        getattr(self.gait_controller, "feet", {}).get(
+                            leg, NOMINAL_FEET[leg]
+                        )[2] - NOMINAL_FEET[leg][2],
+                    ) * 1000.0,
+                    1,
+                )
+                for leg in LEG_ORDER
+            },
+            "stride_floor_m": float(
+                self.gait_configs[self.gait_name].get("stride_floor_m", 0.0)
+            ),
+            "speed_floor_fraction": self.speed_floor_fraction(self.gait_name),
             "projected_targets": list(self.projected_targets),
             "clamped_joints": clamped_joints,
             "workspace_margin": workspace_margin,

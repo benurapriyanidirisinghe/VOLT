@@ -41,6 +41,11 @@ TUNABLE_FIELDS = (
     "smoothing_amount",
     "touchdown_softness",
     "stance_width",
+    # Command shaping. Both already existed per gait in gait_controller.yaml;
+    # they are surfaced here so the ramp can be tuned from the GUI without a
+    # rebuild. See the note in NUMERIC_BOUNDS for the time constants.
+    "command_acceleration",
+    "velocity_filter_alpha",
 )
 
 # These bounds are narrower than the reachable IK envelope.  Final joint
@@ -68,6 +73,17 @@ NUMERIC_BOUNDS = {
     "smoothing_amount": (0.0, 0.80),
     "touchdown_softness": (0.08, 0.35),
     "stance_width": (0.080, 0.130),
+    # SLEW RATE on the commanded twist, m/s^2. This is the dominant ramp:
+    # at the shipped 0.08 (x0.80 on hardware = 0.064 m/s^2) a trot takes
+    # 1.0 s to reach 0.064 m/s and a run 2.6 s to reach 0.138. Lower is
+    # gentler off the line; higher is more responsive and more of a lurch.
+    "command_acceleration": (0.02, 0.40),
+    # FIRST-ORDER LOW-PASS on the same twist, as a per-tick blend at the
+    # 100 Hz control rate. Time constant tau = -0.01 / ln(1 - alpha):
+    # alpha 0.30 -> 28 ms, 0.22 -> 40 ms, 0.10 -> 95 ms. It sits ahead of
+    # the slew limiter, so for step inputs the slew rate above is what you
+    # feel; this one takes the jitter off a moving stick.
+    "velocity_filter_alpha": (0.05, 1.00),
 }
 
 TUNABLE_GAITS = (
