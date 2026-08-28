@@ -5986,8 +5986,13 @@ class VoltControlWindow(QMainWindow):
             colour, state = "#fca5a5", "STALE %.1f s" % age
         elif age > 1.0:
             colour, state = "#fbbf24", "slow %.1f s" % age
-        else:
+        elif self.motion_status_rate > 0.0:
             colour, state = "#86efac", "%.0f Hz" % self.motion_status_rate
+        else:
+            # The rate needs a full one-second window before it means
+            # anything. Showing "0 Hz" on a link that is plainly alive reads
+            # as a fault, so report the age until the first window closes.
+            colour, state = "#86efac", "live %.2f s" % age
 
         # A bridge on a different machine from the controller is a genuinely
         # broken split, not a slow one, so it outranks the freshness colour.
