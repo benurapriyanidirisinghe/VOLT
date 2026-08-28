@@ -18,3 +18,9 @@ __pycache__/
 
 # one-off GUI recovery artifacts (bytecode + stub backup)
 gui_recovery/
+
+# Real WiFi credentials for the ESP32 servo board. This repository is public;
+# a network password committed here is a password published to the internet,
+# and history rewriting does not un-publish it. The tracked template is
+# firmware/volt_esp32_pca9685/wifi_credentials_example.h
+firmware/*/wifi_credentials.h

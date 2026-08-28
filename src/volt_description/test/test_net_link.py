@@ -305,6 +305,39 @@ class Esp32FirmwareTests(unittest.TestCase):
         for field in ("WIFI_SSID", "WIFI_RSSI", "WIFI_IP"):
             self.assertIn('"%s",' % field, protocol)
 
+    def test_no_credentials_are_committed(self):
+        """This repository is public; a committed password is a published one."""
+        sketch_dir = self.SKETCH.parent
+        real = sketch_dir / "wifi_credentials.h"
+        template = sketch_dir / "wifi_credentials_example.h"
+        self.assertTrue(
+            template.is_file(),
+            "the tracked template must exist so a fresh clone can build",
+        )
+        gitignore = source(
+            Path(__file__).resolve().parents[3] / ".gitignore"
+        )
+        self.assertIn("wifi_credentials.h", gitignore)
+        if real.is_file():
+            import subprocess
+
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", str(real)],
+                cwd=str(Path(__file__).resolve().parents[3]),
+                capture_output=True,
+            )
+            self.assertNotEqual(
+                0, tracked.returncode,
+                "wifi_credentials.h is tracked by git; the password is public",
+            )
+
+    def test_sketch_has_no_inline_password(self):
+        """The fallback must stay a placeholder, not someone's real key."""
+        block = self.text[self.text.index("const WifiNetwork WIFI_NETWORKS[]"):][:400]
+        self.assertIn("VOLT_WIFI_NETWORKS", block)
+        fallback = self.text[self.text.index("#define VOLT_WIFI_NETWORKS"):][:200]
+        self.assertIn("CHANGE_ME", fallback)
+
     def test_psram_pins_are_not_used_for_io(self):
         """GPIO 35/36/37 carry octal PSRAM on the N16R8 module."""
         for name in ("PIN_I2C_SDA", "PIN_I2C_SCL"):

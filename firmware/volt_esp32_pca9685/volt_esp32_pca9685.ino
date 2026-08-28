@@ -41,10 +41,20 @@ struct WifiNetwork {
   const char *password;
 };
 
+// Credentials live in wifi_credentials.h, which is gitignored. This
+// repository is public: a password committed here is a password published,
+// and rewriting history afterwards does not un-publish it. The tracked
+// template is wifi_credentials_example.h, and the fallback below keeps a
+// fresh clone compiling.
+#if __has_include("wifi_credentials.h")
+#include "wifi_credentials.h"
+#else
+#define VOLT_WIFI_NETWORKS {"CHANGE_ME", "CHANGE_ME"},
+#warning "wifi_credentials.h not found - copy wifi_credentials_example.h and fill it in"
+#endif
+
 const WifiNetwork WIFI_NETWORKS[] = {
-  {"CHANGE_ME", "CHANGE_ME"},
-  // {"workshop-2g", "..."},
-  // {"phone-hotspot", "..."},
+  VOLT_WIFI_NETWORKS
 };
 const uint8_t WIFI_NETWORK_COUNT =
   sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
