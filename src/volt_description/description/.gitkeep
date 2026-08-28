@@ -1,0 +1,4 @@
+# CMakeLists.txt installs this directory (install(DIRECTORY ... description ...)).
+# Git does not track empty directories, so without this placeholder a fresh
+# clone has no description/ and the build fails at
+# ament_cmake_symlink_install_directory() before compiling anything.

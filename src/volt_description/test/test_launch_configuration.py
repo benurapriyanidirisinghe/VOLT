@@ -371,3 +371,87 @@ class ScriptInstallationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SplitJetsonStackTests(unittest.TestCase):
+    """The Jetson/workstation split, checked statically.
+
+    The robot half and the console half are two launch files that must not
+    overlap: anything with a deadline belongs next to the Arduino, and
+    anything heavy belongs on the workstation. These assert that split, and
+    that the single-machine paths were not disturbed to get it.
+    """
+
+    JETSON = LAUNCH / "volt_jetson.launch.py"
+    OPERATOR = LAUNCH / "volt_operator.launch.py"
+
+    def test_both_launch_files_exist(self):
+        self.assertTrue(self.JETSON.is_file())
+        self.assertTrue(self.OPERATOR.is_file())
+
+    def test_robot_half_starts_no_renderer_and_no_console(self):
+        text = source(self.JETSON)
+        self.assertNotIn("ignition.launch.py", text)
+        self.assertNotIn("volt_control_gui", text)
+        self.assertIn("volt_serial_bridge.py", text)
+        self.assertIn("control.launch.py", text)
+
+    def test_console_half_starts_no_hardware(self):
+        text = source(self.OPERATOR)
+        self.assertNotIn("volt_serial_bridge", text)
+        self.assertNotIn("volt_motion_controller", text)
+        self.assertIn("volt_control_gui.py", text)
+        self.assertIn("ignition.launch.py", text)
+
+    def test_robot_half_defaults_to_dry_run(self):
+        """A split stack must not come up talking to servos by accident."""
+        defaults = launch_argument_defaults(self.JETSON)
+        self.assertEqual("true", defaults["dry_run"])
+        self.assertEqual("false", defaults["auto_arm"])
+        self.assertEqual("false", defaults["auto_ready_pose"])
+
+    def test_robot_half_never_follows_a_simulation_clock(self):
+        """There is no Gazebo on the Jetson, so there is no /clock to follow."""
+        text = source(self.JETSON)
+        self.assertIn('"use_sim_time": "false"', text)
+
+    def test_console_half_never_follows_a_simulation_clock(self):
+        """The authority is the Jetson's wall clock, not the shadow's."""
+        self.assertIn('"use_sim_time": "false"', source(self.OPERATOR))
+
+    def test_single_machine_launch_is_unchanged_by_the_split(self):
+        """volt_start.launch.py must not learn about the Jetson."""
+        text = source(LAUNCH / "volt_start.launch.py")
+        for token in ("jetson", "Jetson", "ssh", "volt_operator"):
+            self.assertNotIn(token, text)
+
+    def test_runner_script_is_installed(self):
+        cmake = source(ROOT / "CMakeLists.txt")
+        self.assertIn("scripts/volt_jetson_run.sh", cmake)
+
+    def test_runner_tears_down_the_remote_half_on_every_exit(self):
+        """A console that dies must not leave the Jetson streaming frames."""
+        runner = source(ROOT / "scripts" / "volt_jetson_run.sh")
+        self.assertIn("trap stop_remote EXIT INT TERM", runner)
+        # SIGINT before SIGKILL, so the bridge can send HOLD and the
+        # firmware disarms cleanly instead of timing out.
+        self.assertIn("kill -INT -$pgid", runner)
+        self.assertIn("kill -9 -$pgid", runner)
+
+    def test_launcher_keeps_the_original_modes(self):
+        launcher = source(ROOT / "scripts" / "volt_desktop_launcher.sh")
+        for mode in ("sim)", "gui)", "physical)", "jetson)"):
+            self.assertIn(mode, launcher)
+
+    def test_empty_installed_directories_are_kept_in_git(self):
+        """install(DIRECTORY ...) fails on a clean clone without these.
+
+        description/ and meshes/ are empty; git does not track empty
+        directories, so a fresh clone had neither and the build died in
+        ament_cmake_symlink_install_directory before compiling anything.
+        """
+        for name in ("description", "meshes"):
+            self.assertTrue(
+                (ROOT / name / ".gitkeep").is_file(),
+                "%s/.gitkeep is what makes a clean clone buildable" % name,
+            )

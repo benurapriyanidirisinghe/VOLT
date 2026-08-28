@@ -39,6 +39,11 @@ install(
 )
 
 install(
+  PROGRAMS scripts/volt_jetson_run.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   FILES scripts/volt_face.py
   DESTINATION lib/${PROJECT_NAME}
 )

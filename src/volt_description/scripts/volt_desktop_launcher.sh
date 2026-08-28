@@ -130,6 +130,41 @@ if [ -z "${VOLT_IN_TERM:-}" ]; then
     [ -x "$RUNNER" ] || [ -f "$RUNNER" ] || die_dialog "Cannot find the VOLT runner:\n$RUNNER"
     VOLT_DRY="true"
 
+    if [ "$MODE" = "jetson" ]; then
+        # The Arduino is on the Jetson in this mode, so the port check and
+        # the reachability check both happen over SSH inside the runner.
+        # Only the safety confirmation belongs here.
+        CHOICE="$(zenity --question --width=560 --title="VOLT — run the robot from the Jetson" \
+            --ok-label="Launch LIVE" --cancel-label="Cancel" \
+            --extra-button="Launch dry-run" \
+            --text="<b>This runs the robot half on the Jetson and the console here.</b>
+
+The motion controller, router and serial bridge run on
+<tt>${VOLT_JETSON_USER:-friday}@${VOLT_JETSON_HOST:-jetson-ros.local}</tt>.
+The console, the gamepad and the Ignition shadow run on this PC.
+
+Build and simulation success do <b>not</b> establish that a servo mapping,
+direction, trim, or mechanical limit is safe.
+
+Before continuing:
+  •  Raise the robot so its feet cannot reach the ground
+  •  Keep the servo-power disconnect within reach
+  •  Expect to ARM manually — no motion happens until you do
+
+Closing the console window stops the Jetson half too.
+
+<i>Launch dry-run</i> starts the identical split stack with servo writes
+logged on the Jetson instead of sent." 2>/dev/null)"
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            VOLT_DRY="false"
+        elif [ "$CHOICE" = "Launch dry-run" ]; then
+            VOLT_DRY="true"
+        else
+            exit 0
+        fi
+    fi
+
     if [ "$MODE" = "physical" ]; then
         PORT="$(find_serial_port)" || die_dialog \
 "No Arduino found.\n\nNo /dev/ttyUSB* or /dev/ttyACM* device is present. Connect the Nano and try again.\n\nTo drive the simulation instead, use the VOLT Simulation icon."
@@ -163,6 +198,7 @@ instead of sent. Nothing reaches the hardware." 2>/dev/null)"
 
     TITLE="VOLT — ${MODE}"
     [ "$MODE" = "physical" ] && [ "$VOLT_DRY" = "false" ] && TITLE="VOLT — PHYSICAL (LIVE SERVOS)"
+    [ "$MODE" = "jetson" ] && TITLE="VOLT — JETSON$([ "$VOLT_DRY" = "false" ] && echo " (LIVE SERVOS)")"
     INNER="VOLT_IN_TERM=1 VOLT_DRY='$VOLT_DRY' '$0' '$MODE'; echo; \
 echo '[VOLT] stack exited. Press Enter to close this window.'; read -r"
     open_terminal "$TITLE" "$INNER"
@@ -218,8 +254,17 @@ case "$MODE" in
             --gazebo-gui true --use-hardware true --dry-run true --serial-port "$PORT"
         ;;
 
+    jetson)
+        # Deliberately no sweep_orphans: this mode starts nothing locally
+        # that the sweep targets except the console, and the runner's own
+        # EXIT trap owns the remote half. Sweeping here would also kill a
+        # single-machine stack the operator may be running on purpose.
+        echo "[VOLT] split stack: robot half on the Jetson, console here"
+        exec "$WS/src/volt_description/scripts/volt_jetson_run.sh"
+        ;;
+
     *)
-        echo "[VOLT] unknown mode '$MODE' (expected sim, gui, or physical)"
+        echo "[VOLT] unknown mode '$MODE' (expected sim, gui, physical, or jetson)"
         exit 2
         ;;
 esac

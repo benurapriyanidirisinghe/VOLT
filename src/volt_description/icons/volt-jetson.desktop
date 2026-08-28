@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VOLT Jetson Robot
+GenericName=VOLT quadruped (split stack)
+Comment=Robot half on the Jetson, console and gamepad here. Raise the robot before arming.
+Exec=/home/ros2/Documents/volt_ws/src/volt_description/scripts/volt_desktop_launcher.sh jetson
+Icon=/home/ros2/Documents/volt_ws/src/volt_description/icons/volt-jetson.png
+Terminal=false
+StartupNotify=true
+Categories=Development;
+Keywords=VOLT;ROS;quadruped;robot;jetson;remote;
