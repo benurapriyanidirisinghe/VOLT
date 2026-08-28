@@ -187,6 +187,22 @@ class BridgeIntegrationTests(unittest.TestCase):
         connect = self.bridge[self.bridge.index("    def connect(self):"):][:2600]
         self.assertIn("self.baud_locked = True", connect)
 
+    def test_link_health_is_polled_before_arming(self):
+        """The counters are the pre-flight check; gating them behind armed
+        meant the console showed nothing until the servos were already live.
+
+        On the WiFi board they are also the only evidence the radio link
+        works at all, so an operator deciding whether to ARM had none.
+        """
+        poll = self.bridge[self.bridge.index("poll_period = "):][:900]
+        self.assertIn("not self.protocol.armed", poll)
+        # The ARM handshake itself must still bar the poll: a STATUS query
+        # sets serial_query_inflight, and the post-ARM cached frame refuses
+        # while that is set.
+        self.assertIn("not self.arm_requested", poll)
+        self.assertIn("not self.protocol.pending_command", poll)
+        self.assertIn("not self.serial_query_inflight", poll)
+
     def test_pyserial_is_not_required_for_a_network_link(self):
         connect = self.bridge[self.bridge.index("    def connect(self):"):][:1200]
         self.assertIn("if serial is None and not network:", connect)

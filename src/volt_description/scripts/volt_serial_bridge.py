@@ -1904,14 +1904,29 @@ class VoltSerialBridge(Node):
                 # during the ARM handshake makes the post-ARM cached frame fail
                 # and drops the bridge into Hardware HOLD.  Poll only once
                 # streaming is actually established, never while arming.
+                #
+                # Polled when NOT armed too, at a slower cadence. The counters
+                # are how an operator confirms the link before committing to
+                # ARM -- frames arriving, CRC clean, RSSI sane -- and gating
+                # them behind armed meant the console showed nothing until
+                # after the servos were already live. That is backwards for a
+                # pre-flight check, and on the WiFi board it is the only
+                # evidence the radio link works at all.
+                #
+                # The dangerous window is the ARM handshake itself, not the
+                # disarmed state, so arm_requested/pending_command/inflight
+                # still bar the poll and nothing about the handshake changes.
+                poll_period = 10.0 if self.protocol.armed else 5.0
                 if (
                     self.protocol.ready
-                    and self.protocol.armed
-                    and self.protocol.can_stream_frames
+                    and (
+                        not self.protocol.armed
+                        or self.protocol.can_stream_frames
+                    )
                     and not self.arm_requested
                     and not self.protocol.pending_command
                     and not self.serial_query_inflight
-                    and now - self.last_firmware_status_poll >= 10.0
+                    and now - self.last_firmware_status_poll >= poll_period
                 ):
                     if self.send_protocol_command("STATUS"):
                         self.last_firmware_status_poll = now
