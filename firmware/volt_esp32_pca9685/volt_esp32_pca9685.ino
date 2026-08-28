@@ -26,6 +26,7 @@
 // that boots, runs, and then fails in ways that look like a wiring fault.
 
 #include <WiFi.h>
+#include <ESPmDNS.h>
 
 // ---------------------------------------------------------------- config --
 // Set these before flashing. Kept as plain constants rather than a captive
@@ -84,21 +85,40 @@ const int PIN_I2C_SCL = 9;
 // 60 Hz control stream and shows up as a stuttering gait.
 const bool WIFI_DISABLE_SLEEP = true;
 
-// A client that stops sending is treated as gone after this long, and the
-// board drops it so a new host can connect.
+// Dead-peer detection is TCP KEEPALIVE, not silence.
 //
-// Without it, "one host only" becomes "one host ever": TCP does not notice a
-// peer that died without a FIN -- a crashed console, a yanked network, a
-// laptop that slept -- so voltClient.connected() stays true for minutes and
-// every reconnect is answered with ERR BUSY. Recovering meant power-cycling
-// the robot, which is not an acceptable answer to a GUI crash.
+// The obvious approach -- drop a client that has sent nothing for N seconds
+// -- is wrong for this protocol, and measurably so. The host only streams
+// frames while ARMED, and the bridge's own STATUS poll is gated behind
+// protocol.armed too, so a perfectly healthy pre-arm console sends NOTHING,
+// indefinitely. A silence timeout dropped it on a loop: connected, dropped,
+// reconnected, handshake never finished, connected=1 ready=0 forever.
 //
-// Five seconds is far longer than the host's 60 Hz frame period and its
-// 10 s STATUS poll gap is covered by frames, so a live host is never
-// mistaken for a dead one. The servos are already safe long before this
-// fires: COMMAND_TIMEOUT_MS disarms at 750 ms.
-const uint32_t CLIENT_IDLE_TIMEOUT_MS = 5000;
-uint32_t lastClientByteMs = 0;
+// Keepalive asks the question properly. An idle-but-alive host answers the
+// probes in the kernel with no application traffic; a host that died without
+// a FIN -- a crashed console, a yanked network, a slept laptop -- answers
+// nothing, connected() goes false on its own, and the existing disconnect
+// path handles it.
+//
+// 10 s idle, 3 s interval, 3 probes: a dead peer is gone in ~19 s against
+// the minutes TCP takes by default. The servos are safe long before that
+// either way -- COMMAND_TIMEOUT_MS disarms at 750 ms.
+// Socket option numbers, spelled out rather than pulled in from
+// <lwip/sockets.h>. That header shifts where the Arduino preprocessor
+// inserts its auto-generated prototypes, which lands them ahead of this
+// sketch's own enums and breaks the build in a place with no connection to
+// networking. These are lwIP's stable ABI values.
+const int VOLT_SOL_SOCKET = 0xfff;
+const int VOLT_SO_KEEPALIVE = 0x0008;
+const int VOLT_IPPROTO_TCP = 6;
+const int VOLT_TCP_KEEPIDLE = 0x03;
+const int VOLT_TCP_KEEPINTVL = 0x04;
+const int VOLT_TCP_KEEPCNT = 0x05;
+
+const int CLIENT_KEEPALIVE_IDLE_S = 10;
+const int CLIENT_KEEPALIVE_INTERVAL_S = 3;
+const int CLIENT_KEEPALIVE_COUNT = 3;
+
 
 WiFiServer voltServer(VOLT_TCP_PORT);
 WiFiClient voltClient;
@@ -2015,7 +2035,6 @@ void readSerialLines() {
     char c = (char)Host.read();
     lastSerialByteUs = micros();
     // Evidence the host is alive, recorded where the byte is actually taken.
-    lastClientByteMs = millis();
     if (binActive) {
       binBuffer[binLength++] = (uint8_t)c;
       if (binLength >= BIN_FRAME_BODY_LEN) {
@@ -2223,6 +2242,15 @@ void startNetwork() {
     Serial.print(VOLT_HOSTNAME);
     Serial.print(F(".local  port "));
     Serial.println(VOLT_TCP_PORT);
+    // Without this, volt-esp32.local does not resolve and the desktop icon's
+    // default endpoint fails even though the board is up: setHostname() sets
+    // the DHCP client name, which is not the same as answering mDNS.
+    if (MDNS.begin(VOLT_HOSTNAME)) {
+      MDNS.addService("volt", "tcp", VOLT_TCP_PORT);
+      Serial.println(F("[volt] mDNS responder started"));
+    } else {
+      Serial.println(F("[volt] mDNS failed; use the IP above"));
+    }
   } else {
     // Not fatal: the loop still runs, the servos hold their safe pose and
     // the USB console still reports. serviceNetwork() keeps retrying.
@@ -2230,6 +2258,21 @@ void startNetwork() {
   }
   voltServer.begin();
   voltServer.setNoDelay(true);
+}
+
+void enableClientKeepalive(WiFiClient &client) {
+  int enable = 1;
+  int idle = CLIENT_KEEPALIVE_IDLE_S;
+  int interval = CLIENT_KEEPALIVE_INTERVAL_S;
+  int count = CLIENT_KEEPALIVE_COUNT;
+  client.setSocketOption(VOLT_SOL_SOCKET, VOLT_SO_KEEPALIVE,
+                         &enable, sizeof(enable));
+  client.setSocketOption(VOLT_IPPROTO_TCP, VOLT_TCP_KEEPIDLE,
+                         &idle, sizeof(idle));
+  client.setSocketOption(VOLT_IPPROTO_TCP, VOLT_TCP_KEEPINTVL,
+                         &interval, sizeof(interval));
+  client.setSocketOption(VOLT_IPPROTO_TCP, VOLT_TCP_KEEPCNT,
+                         &count, sizeof(count));
 }
 
 void serviceNetwork() {
@@ -2256,20 +2299,7 @@ void serviceNetwork() {
     onHostDisconnected();
   }
 
-  // A peer that died without a FIN still looks connected, so silence is the
-  // only evidence available. The timer is refreshed in readSerialLines()
-  // where bytes are actually CONSUMED -- checking available() here instead
-  // was wrong, because it reports what is still unread, which drops to zero
-  // the moment the parser does its job. A host that had just sent a command
-  // was therefore declared silent five seconds later and disconnected
-  // mid-conversation.
-  if (voltClient && voltClient.connected()
-      && lastClientByteMs != 0
-      && millis() - lastClientByteMs > CLIENT_IDLE_TIMEOUT_MS) {
-    Serial.println(F("[volt] host silent; dropping it so a new one can connect"));
-    voltClient.stop();
-    onHostDisconnected();
-  }
+
 
   if (!voltClient || !voltClient.connected()) {
     WiFiClient incoming = voltServer.accept();
@@ -2281,7 +2311,6 @@ void serviceNetwork() {
       // could stall loop() for seconds -- far past the 750 ms disarm, with
       // the servos held at their last target the whole time.
       voltClient.setTimeout(0);
-      lastClientByteMs = millis();
       // A fresh host has not armed anything yet, and must not inherit the
       // previous session's arm state.
       onHostDisconnected();
@@ -2324,7 +2353,6 @@ void onHostDisconnected() {
   hostPingSeen = false;
   hostSnapshotSeen = false;
   hostSynced = false;
-  lastClientByteMs = 0;
 }
 
 void setup() {
