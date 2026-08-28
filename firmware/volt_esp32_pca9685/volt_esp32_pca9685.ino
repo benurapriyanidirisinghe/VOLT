@@ -66,6 +66,12 @@ const uint8_t WIFI_NETWORK_COUNT =
 const int8_t WIFI_WEAK_RSSI = -75;   // below this, warn that the link is marginal
 
 // Which network was joined, for STATUS and for the scan report.
+// Retry pacing for reconnection. At file scope, not function-static, so a
+// successful join can clear it and EVERY future outage gets an immediate
+// first attempt rather than only the first one after boot.
+uint32_t wifiLastRetryMs = 0;
+bool wifiRetriedSinceLoss = false;
+
 char wifiJoinedSsid[33] = "";
 int32_t wifiJoinedRssi = 0;
 
@@ -2160,33 +2166,58 @@ int configuredIndexFor(const char *ssid) {
 // Pick the configured network with the strongest signal that is actually
 // on the air. Returns -1 when none of them are visible, which is a much
 // more useful thing to report than a bare join timeout.
-int bestVisibleNetwork(int scanCount, int32_t *rssiOut) {
-  int bestConfigured = -1;
-  int32_t bestRssi = -1000;
+// Collect every configured network the scan can see, strongest first.
+//
+// Returns how many were found and fills `order` with indices into
+// WIFI_NETWORKS. Picking only the single best was not enough: if that one
+// refuses the join -- wrong password, AP full, a hotspot that advertises but
+// will not accept -- every retry rescans and chooses the same loser again,
+// and a perfectly good second network is never tried. Ordering them lets the
+// join walk down the list.
+int visibleNetworksByStrength(int scanCount, uint8_t *order, int32_t *rssis,
+                              int capacity) {
+  int found = 0;
   for (int index = 0; index < scanCount; ++index) {
     const int configured = configuredIndexFor(WiFi.SSID(index).c_str());
     if (configured < 0) {
       continue;
     }
-    const int32_t rssi = WiFi.RSSI(index);
-    if (rssi > bestRssi) {
-      bestRssi = rssi;
-      bestConfigured = configured;
+    // Skip a network already collected: an SSID can appear once per band or
+    // per repeater, and trying it twice wastes a whole join timeout.
+    bool duplicate = false;
+    for (int seen = 0; seen < found; ++seen) {
+      if (order[seen] == (uint8_t)configured) {
+        duplicate = true;
+        break;
+      }
     }
+    if (duplicate || found >= capacity) {
+      continue;
+    }
+    const int32_t rssi = WiFi.RSSI(index);
+    int slot = found;
+    while (slot > 0 && rssis[slot - 1] < rssi) {
+      order[slot] = order[slot - 1];
+      rssis[slot] = rssis[slot - 1];
+      --slot;
+    }
+    order[slot] = (uint8_t)configured;
+    rssis[slot] = rssi;
+    ++found;
   }
-  if (bestConfigured >= 0 && rssiOut != nullptr) {
-    *rssiOut = bestRssi;
-  }
-  return bestConfigured;
+  return found;
 }
 
 bool joinBestNetwork() {
   const int found = scanAndReportNetworks();
-  int32_t rssi = 0;
-  const int choice = bestVisibleNetwork(found, &rssi);
+  uint8_t order[WIFI_NETWORK_COUNT];
+  int32_t rssis[WIFI_NETWORK_COUNT];
+  const int candidates = found > 0
+    ? visibleNetworksByStrength(found, order, rssis, WIFI_NETWORK_COUNT)
+    : 0;
   WiFi.scanDelete();
 
-  if (choice < 0) {
+  if (candidates == 0) {
     Serial.println(F("[volt] none of the configured networks are visible."));
     Serial.println(F("[volt] check WIFI_NETWORKS in this sketch against the"));
     Serial.println(F("[volt] scan above; SSIDs are case sensitive."));
@@ -2195,34 +2226,45 @@ bool joinBestNetwork() {
     return false;
   }
 
-  Serial.print(F("[volt] joining "));
-  Serial.print(WIFI_NETWORKS[choice].ssid);
-  Serial.print(F(" at "));
-  Serial.print(rssi);
-  Serial.println(F(" dBm"));
-  if (rssi < WIFI_WEAK_RSSI) {
-    Serial.println(F("[volt] WARNING: weak signal. Expect frame drops and"));
-    Serial.println(F("[volt] a 750 ms disarm if the link stalls."));
+  for (int attempt = 0; attempt < candidates; ++attempt) {
+    const uint8_t choice = order[attempt];
+    const int32_t rssi = rssis[attempt];
+    Serial.print(F("[volt] joining "));
+    Serial.print(WIFI_NETWORKS[choice].ssid);
+    Serial.print(F(" at "));
+    Serial.print(rssi);
+    Serial.println(F(" dBm"));
+    if (rssi < WIFI_WEAK_RSSI) {
+      Serial.println(F("[volt] WARNING: weak signal. Expect frame drops and"));
+      Serial.println(F("[volt] a 750 ms disarm if the link stalls."));
+    }
+
+    WiFi.disconnect();
+    WiFi.begin(WIFI_NETWORKS[choice].ssid, WIFI_NETWORKS[choice].password);
+    // 8 s, not 15. A 2.4 GHz join normally completes in 2-4 s, and a longer
+    // wait here is time not spent trying the network that would have worked.
+    const uint32_t deadline = millis() + 8000UL;
+    while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
+      delay(200);
+      Serial.print('.');
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+      strncpy(wifiJoinedSsid, WIFI_NETWORKS[choice].ssid,
+              sizeof(wifiJoinedSsid) - 1);
+      wifiJoinedSsid[sizeof(wifiJoinedSsid) - 1] = '\0';
+      wifiJoinedRssi = WiFi.RSSI();
+      return true;
+    }
+    Serial.print(F("[volt] "));
+    Serial.print(WIFI_NETWORKS[choice].ssid);
+    Serial.println(F(" refused the join (wrong password?)"));
   }
 
-  WiFi.begin(WIFI_NETWORKS[choice].ssid, WIFI_NETWORKS[choice].password);
-  const uint32_t deadline = millis() + 15000UL;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay(200);
-    Serial.print('.');
-  }
-  Serial.println();
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("[volt] join failed (wrong password?)"));
-    wifiJoinedSsid[0] = '\0';
-    wifiJoinedRssi = 0;
-    return false;
-  }
-  strncpy(wifiJoinedSsid, WIFI_NETWORKS[choice].ssid,
-          sizeof(wifiJoinedSsid) - 1);
-  wifiJoinedSsid[sizeof(wifiJoinedSsid) - 1] = '\0';
-  wifiJoinedRssi = WiFi.RSSI();
-  return true;
+  Serial.println(F("[volt] every visible configured network refused."));
+  wifiJoinedSsid[0] = '\0';
+  wifiJoinedRssi = 0;
+  return false;
 }
 
 void startNetwork() {
@@ -2285,14 +2327,20 @@ void serviceNetwork() {
     // changed channel, or a second configured AP may now be the strong one.
     // Safe to block here -- reaching this branch means there is no host, so
     // nothing is armed and no servo stream is being starved.
-    static uint32_t lastRetryMs = 0;
-    if (millis() - lastRetryMs > 8000UL) {
-      lastRetryMs = millis();
+    // First attempt fires at once. Waiting the full backoff before even
+    // trying meant a network that came back took ~20 s to be rejoined when
+    // the scan-and-join itself takes about half that.
+    if (!wifiRetriedSinceLoss || millis() - wifiLastRetryMs > 8000UL) {
+      wifiRetriedSinceLoss = true;
+      wifiLastRetryMs = millis();
       WiFi.disconnect();
       joinBestNetwork();
     }
     return;
   }
+
+  // Connected: arm a fast first retry for whenever this link next drops.
+  wifiRetriedSinceLoss = false;
 
   if (voltClient && !voltClient.connected()) {
     voltClient.stop();

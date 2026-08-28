@@ -294,10 +294,16 @@ class Esp32FirmwareTests(unittest.TestCase):
         self.assertIn("WIFI_NETWORK_COUNT", self.text)
 
     def test_joins_the_strongest_visible_network_not_the_first(self):
-        """Joining a weak AP when a strong one is present stutters the stream."""
-        chooser = function_body(self.text, "int bestVisibleNetwork")
+        """Joining a weak AP when a strong one is present stutters the stream.
+
+        bestVisibleNetwork() has been replaced by an ordered candidate list
+        so a refused join can fall through to the next network; strongest is
+        still tried first.
+        """
+        chooser = function_body(self.text, "int visibleNetworksByStrength(")
         self.assertIn("WiFi.RSSI(index)", chooser)
-        self.assertIn("rssi > bestRssi", chooser)
+        self.assertIn("rssis[slot - 1] < rssi", chooser)
+        self.assertNotIn("int bestVisibleNetwork", self.text)
 
     def test_scan_never_runs_while_servos_are_being_driven(self):
         """scanNetworks() blocks for seconds; that would trip the 750 ms disarm."""
@@ -418,6 +424,36 @@ class Esp32FirmwareTests(unittest.TestCase):
         # mention it; only the include itself must be absent.
         self.assertNotIn("#include <lwip/sockets.h>", self.text)
         self.assertIn("const int VOLT_SO_KEEPALIVE", self.text)
+
+    def test_join_walks_every_visible_network_not_just_the_best(self):
+        """One bad candidate must not lock out a good second network.
+
+        Picking only the strongest meant that if it refused the join --
+        wrong password, AP full, a hotspot advertising but not accepting --
+        every retry rescanned and chose the same loser again, and the other
+        configured network was never tried.
+        """
+        self.assertIn("int visibleNetworksByStrength(", self.text)
+        join = function_body(self.text, "bool joinBestNetwork()")
+        self.assertIn("visibleNetworksByStrength(", join)
+        self.assertIn("for (int attempt = 0; attempt < candidates", join)
+        self.assertIn("refused the join", join)
+
+    def test_candidate_list_is_ordered_strongest_first(self):
+        chooser = function_body(self.text, "int visibleNetworksByStrength(")
+        self.assertIn("rssis[slot - 1] < rssi", chooser)
+        # An SSID seen twice (two bands, a repeater) must not burn two join
+        # timeouts on the same network.
+        self.assertIn("duplicate", chooser)
+
+    def test_reconnect_retries_immediately_then_backs_off(self):
+        """Waiting the full backoff before even trying cost ~20 s per outage."""
+        service = function_body(self.text, "void serviceNetwork()")
+        self.assertIn("!wifiRetriedSinceLoss", service)
+        self.assertIn("wifiRetriedSinceLoss = false;", service)
+        # File scope, not function-static: a static would give only the first
+        # outage after boot a fast retry.
+        self.assertIn("bool wifiRetriedSinceLoss = false;", self.text)
 
     def test_board_answers_mdns(self):
         """setHostname() sets the DHCP name only; the icon needs .local."""
