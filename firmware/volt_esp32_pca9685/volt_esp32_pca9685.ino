@@ -1541,6 +1541,15 @@ void processBinaryFrame() {
   binHaveLastSeq = true;
   binLastSeq = sequence;
 
+  // Counted HERE, on a frame that passed CRC, not at the end after the
+  // arm check. FRAMES_BIN is what the host's link-health panel reads as
+  // evidence the transport works, and a disarmed board is exactly when an
+  // operator wants that evidence -- before arming, not after. Counting it
+  // at the end meant a perfectly healthy link reported FRAMES_BIN=0
+  // alongside CRC_FAIL=0 and SEQ_GAP=0, which reads as "nothing is
+  // arriving" rather than "nothing is being applied, as intended".
+  framesRxBin++;
+
   if (!servoArmed) {
     // The host is alive and streaming; refresh liveness but move nothing.
     // No print: a disarmed board answering 60 frames/s would flood the wire.
@@ -1566,7 +1575,6 @@ void processBinaryFrame() {
     setTargetChannel(channel, values[channel]);
   }
   noteFrameApplied();
-  framesRxBin++;
 }
 
 bool handleServo(char **cursor) {
