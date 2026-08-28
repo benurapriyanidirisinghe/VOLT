@@ -5,6 +5,7 @@ import json
 import math
 import os
 import signal
+import socket
 import sys
 import time
 import uuid
@@ -1193,6 +1194,12 @@ class VoltControlWindow(QMainWindow):
         self.last_step_keepalive_publish_time = 0.0
         self.motion_controller_connected = False
         self.last_motion_status_time = 0.0
+        self.console_host = socket.gethostname()
+        self.robot_host = ""
+        self.bridge_host = ""
+        self.motion_status_rate = 0.0
+        self.motion_status_window_start = 0.0
+        self.motion_status_window_count = 0
         self.gamepad = None
         self.gamepad_name = ""
         self.gamepad_buttons = {}
@@ -1284,6 +1291,17 @@ class VoltControlWindow(QMainWindow):
         header.addWidget(title)
         header.addWidget(subtitle)
         header.addStretch(1)
+        # Where the robot half is running. In the split Jetson stack the
+        # nodes driving the servos are on another machine, and a console
+        # that looks identical either way is a console that can mislead.
+        # Lives in the header so it is visible from every tab.
+        self.robot_link_label = QLabel("Robot link: waiting")
+        self.robot_link_label.setObjectName("robotLink")
+        self.robot_link_label.setToolTip(
+            "Which machine is running the motion controller and serial "
+            "bridge, and how fresh its status is."
+        )
+        header.addWidget(self.robot_link_label)
         outer.addLayout(header)
 
         self.main_tabs = QTabWidget()
@@ -2959,6 +2977,7 @@ class VoltControlWindow(QMainWindow):
         # The firmware travel guard clips silently; the bridge mirrors it and
         # reports here so the GUI can name it in the gate banner.
         self.firmware_guard_clip = fields.get("guard_clip", "-")
+        self.bridge_host = fields.get("host", "")
         label = getattr(self, "firmware_link_label", None)
         if label is None or "fw_crc_fail" not in fields:
             return
@@ -4751,7 +4770,17 @@ class VoltControlWindow(QMainWindow):
         self.physical_tests_enabled = bool(
             status.get("physical_tests_enabled", False)
         )
-        self.last_motion_status_time = time.monotonic()
+        self.robot_host = str(status.get("host", "") or "")
+        now_monotonic = time.monotonic()
+        if self.motion_status_window_start <= 0.0:
+            self.motion_status_window_start = now_monotonic
+        self.motion_status_window_count += 1
+        window = now_monotonic - self.motion_status_window_start
+        if window >= 1.0:
+            self.motion_status_rate = self.motion_status_window_count / window
+            self.motion_status_window_start = now_monotonic
+            self.motion_status_window_count = 0
+        self.last_motion_status_time = now_monotonic
         reported_profiles = status.get("real_tuning_profiles")
         if isinstance(reported_profiles, dict):
             self.real_profiles = merge_reported_real_profiles(
@@ -5794,6 +5823,10 @@ class VoltControlWindow(QMainWindow):
         self.refresh_arm_button()
 
     def refresh_arm_status_freshness(self):
+        # Driven here rather than only on status arrival: a link that has
+        # gone away publishes nothing, and "still shows the last good state"
+        # is exactly the failure this indicator exists to prevent.
+        self.refresh_robot_link()
         """Age out displayed bridge readiness even when no callback arrives."""
         if not self.refresh_stack_topology():
             return
@@ -5918,6 +5951,62 @@ class VoltControlWindow(QMainWindow):
             )
             self.refresh_arm_button()
         return True
+
+    def refresh_robot_link(self, now=None):
+        """Say which machine the robot half is on, and how live it is.
+
+        Deliberately reports the host the MOTION CONTROLLER announces rather
+        than anything the launcher was told: what matters is where the nodes
+        actually are, not what mode somebody thought they started.
+        """
+        label = getattr(self, "robot_link_label", None)
+        if label is None:
+            return
+        now = time.monotonic() if now is None else now
+        age = (
+            now - self.last_motion_status_time
+            if self.last_motion_status_time > 0.0 else None
+        )
+
+        if age is None:
+            label.setText("Robot link:  no controller")
+            label.setStyleSheet("color: #fca5a5; font-weight: bold;")
+            label.setToolTip(
+                "No motion-controller status has arrived. On the split "
+                "stack, check the Jetson half is running."
+            )
+            return
+
+        host = self.robot_host or "unknown"
+        remote = bool(self.robot_host) and self.robot_host != self.console_host
+        where = "%s \u2192 %s" % (self.console_host, host) if remote else host
+        kind = "REMOTE" if remote else "local"
+
+        if age > 3.0:
+            colour, state = "#fca5a5", "STALE %.1f s" % age
+        elif age > 1.0:
+            colour, state = "#fbbf24", "slow %.1f s" % age
+        else:
+            colour, state = "#86efac", "%.0f Hz" % self.motion_status_rate
+
+        # A bridge on a different machine from the controller is a genuinely
+        # broken split, not a slow one, so it outranks the freshness colour.
+        mismatch = (
+            self.bridge_host
+            and self.robot_host
+            and self.bridge_host != self.robot_host
+        )
+        if mismatch:
+            colour = "#fca5a5"
+            state = "SPLIT MISMATCH (bridge on %s)" % self.bridge_host
+
+        label.setText("Robot link:  %s  [%s]  %s" % (where, kind, state))
+        label.setStyleSheet("color: %s; font-weight: bold;" % colour)
+        label.setToolTip(
+            "Motion controller on %s, serial bridge on %s.\n"
+            "Console on %s. Status age %.2f s."
+            % (host, self.bridge_host or "unknown", self.console_host, age)
+        )
 
     def motion_status_is_fresh(self, now=None):
         if now is None:

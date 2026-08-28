@@ -475,3 +475,30 @@ class SplitJetsonStackTests(unittest.TestCase):
         runner = source(ROOT / "scripts" / "volt_jetson_run.sh")
         self.assertIn("useBuiltinTransports>false", runner)
         self.assertIn("FASTRTPS_DEFAULT_PROFILES_FILE", runner)
+
+    def test_robot_half_announces_which_machine_it_is_on(self):
+        """The console must report where the nodes ARE, not the launch mode."""
+        controller = source(ROOT / "scripts" / "volt_motion_controller.py")
+        self.assertIn("ROBOT_HOST = socket.gethostname()", controller)
+        self.assertIn('"host": ROBOT_HOST,', controller)
+        bridge = source(ROOT / "scripts" / "volt_serial_bridge.py")
+        self.assertIn("BRIDGE_HOST = socket.gethostname()", bridge)
+        self.assertIn("host=%s connected=%d", bridge)
+
+    def test_console_shows_the_robot_link(self):
+        gui = source(ROOT / "scripts" / "volt_control_gui.py")
+        self.assertIn("def refresh_robot_link", gui)
+        self.assertIn("self.robot_link_label", gui)
+        # Driven by the freshness timer, not only on status arrival: a link
+        # that has gone away publishes nothing at all.
+        arm = gui[gui.index("def refresh_arm_status_freshness"):][:400]
+        self.assertIn("self.refresh_robot_link()", arm)
+
+    def test_link_indicator_flags_a_half_migrated_stack(self):
+        """Controller and bridge on different machines is broken, not slow."""
+        gui = source(ROOT / "scripts" / "volt_control_gui.py")
+        link = gui[gui.index("def refresh_robot_link"):][:2600]
+        self.assertIn("SPLIT MISMATCH", link)
+        self.assertIn("self.bridge_host != self.robot_host", link)
+        for state in ("STALE", "no controller", "REMOTE"):
+            self.assertIn(state, link)

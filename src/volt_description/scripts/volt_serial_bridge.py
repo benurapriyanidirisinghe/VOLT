@@ -4,6 +4,7 @@
 
 import json
 import math
+import socket
 import time
 
 import rclpy
@@ -127,6 +128,16 @@ def normalized_color_to_rgb(message):
             raise ValueError("face color channels must be finite")
         channels.append(int(round(max(0.0, min(1.0, value)) * 255.0)))
     return tuple(channels)
+
+
+# Resolved once rather than per status message: gethostname() can touch the
+# resolver. Published so the console can show WHICH machine is driving the
+# Arduino -- with the split Jetson stack that is not the machine the
+# operator is sitting at.
+try:
+    BRIDGE_HOST = socket.gethostname()
+except OSError:
+    BRIDGE_HOST = "unknown"
 
 
 class VoltSerialBridge(Node):
@@ -2007,7 +2018,8 @@ class VoltSerialBridge(Node):
         )
         clamped = [item["joint"] for item in self.last_details if item["clamped"]]
         message.data = (
-            "connected=%d ready=%d armed=%d streaming=%d output_enabled=%d "
+            "host=%s connected=%d ready=%d armed=%d streaming=%d "
+            "output_enabled=%d "
             "dry_run=%d hardware_enabled=%d calibration_valid=%d motion_safe=%d "
             "firmware_id=%s protocol_version=%d required_protocol_version=%d "
             "max_dps=%.1f required_max_dps=%.1f required_max_dps_known=%d "
@@ -2032,6 +2044,7 @@ class VoltSerialBridge(Node):
             "pending=%s error=%s response=%s "
             "clamped=%s guard_clip=%s guard_clip_frames=%d frame=%s"
             % (
+                BRIDGE_HOST,
                 int(self.connected),
                 int(self.protocol.ready),
                 int(self.protocol.armed),

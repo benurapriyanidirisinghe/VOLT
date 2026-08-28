@@ -2,6 +2,7 @@
 
 import json
 import math
+import socket
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
@@ -76,6 +77,13 @@ COMMAND_OWNERS = {
     "DISABLED",
 }
 VELOCITY_GATE_OPEN = "open"
+
+# Resolved once: gethostname() can touch the resolver, and this runs inside
+# a 100 Hz control loop's status publisher.
+try:
+    ROBOT_HOST = socket.gethostname()
+except OSError:
+    ROBOT_HOST = "unknown"
 VELOCITY_GATE_AWAIT_NEUTRAL = "await_neutral"
 VELOCITY_GATE_AWAIT_MOTION = "await_motion"
 OPEN_LOOP_WARNING = (
@@ -3823,6 +3831,11 @@ class VoltMotionController(Node):
         )
         status = {
             "joint_names": list(JOINT_NAMES),
+            # Which machine the robot half is actually running on. With the
+            # split Jetson stack the console is on a different host, and an
+            # operator needs to see that at a glance rather than infer it
+            # from a working status panel.
+            "host": ROBOT_HOST,
             "state": self.state,
             "requested_gait": self.requested_gait,
             "active_gait": self.gait_name,
