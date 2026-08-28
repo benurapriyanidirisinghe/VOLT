@@ -2311,6 +2311,10 @@ void serviceNetwork() {
       // could stall loop() for seconds -- far past the 750 ms disarm, with
       // the servos held at their last target the whole time.
       voltClient.setTimeout(0);
+      // Dead-peer detection. Without this the board never notices a console
+      // that died without a FIN, because nothing else here does: silence is
+      // normal before ARM.
+      enableClientKeepalive(voltClient);
       // A fresh host has not armed anything yet, and must not inherit the
       // previous session's arm state.
       onHostDisconnected();

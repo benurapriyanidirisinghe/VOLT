@@ -380,12 +380,49 @@ class Esp32FirmwareTests(unittest.TestCase):
             "must stay under COMMAND_TIMEOUT_MS, which owns a dead link",
         )
 
-    def test_client_idle_timer_tracks_consumed_bytes(self):
-        """available() reports UNREAD bytes; it hits zero as soon as the
-        parser does its job, so using it declared a live host silent."""
-        self.assertIn("lastClientByteMs = millis();", self.text)
-        reader = function_body(self.text, "void readSerialLines()")
-        self.assertIn("lastClientByteMs = millis();", reader)
+    def test_dead_peer_detection_uses_keepalive_not_silence(self):
+        """Silence is not evidence of death for this protocol.
+
+        The bridge streams frames only while ARMED and gates its STATUS poll
+        behind protocol.armed too, so a healthy PRE-ARM console sends nothing
+        at all. Any silence timeout therefore drops it on a loop and the
+        handshake never completes -- observed on hardware as connected=1
+        with ready=0 forever. Keepalive probes answer the question without
+        needing application traffic.
+        """
+        self.assertIn("enableClientKeepalive", self.text)
+        helper = function_body(self.text, "void enableClientKeepalive")
+        for option in ("VOLT_SO_KEEPALIVE", "VOLT_TCP_KEEPIDLE",
+                       "VOLT_TCP_KEEPINTVL", "VOLT_TCP_KEEPCNT"):
+            self.assertIn(option, helper)
+        service = function_body(self.text, "void serviceNetwork()")
+        self.assertIn("enableClientKeepalive(voltClient);", service)
+        # The mechanism it replaced must be gone, not merely bypassed.
+        self.assertNotIn("lastClientByteMs", self.text)
+        self.assertNotIn("CLIENT_IDLE_TIMEOUT_MS", self.text)
+
+    def test_keepalive_helper_sits_below_the_sketch_types(self):
+        """Arduino inserts auto-prototypes before the FIRST function body.
+
+        Defining this helper above the sketch's enums put every prototype
+        ahead of the types they reference, and the build failed in the face
+        code with no apparent connection to networking.
+        """
+        first_enum = self.text.index("enum FaceEffect")
+        helper = self.text.index("void enableClientKeepalive")
+        self.assertLess(first_enum, helper)
+
+    def test_socket_constants_are_named_locally(self):
+        """<lwip/sockets.h> moves the auto-prototype insertion point too."""
+        # The comment explaining WHY the header is avoided is expected to
+        # mention it; only the include itself must be absent.
+        self.assertNotIn("#include <lwip/sockets.h>", self.text)
+        self.assertIn("const int VOLT_SO_KEEPALIVE", self.text)
+
+    def test_board_answers_mdns(self):
+        """setHostname() sets the DHCP name only; the icon needs .local."""
+        self.assertIn("MDNS.begin(VOLT_HOSTNAME)", self.text)
+        self.assertIn("ESPmDNS.h", self.text)
 
     def test_all_parser_buffers_reset_between_clients(self):
         """A socket changes peers; a UART never did. Leftovers corrupt the
