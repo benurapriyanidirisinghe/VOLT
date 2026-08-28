@@ -314,8 +314,11 @@ case "$MODE" in
         else
             echo "[VOLT] dry-run over WiFi to $BOARD -- servo writes are logged, not sent"
         fi
+        # gazebo defaults to false in the launch file; VOLT_GAZEBO=true
+        # brings the shadow back for a demo without editing anything.
         exec ros2 launch volt_description volt_wifi.launch.py \
-            board_endpoint:="$BOARD" dry_run:="$VOLT_DRY"
+            board_endpoint:="$BOARD" dry_run:="$VOLT_DRY" \
+            gazebo:="${VOLT_GAZEBO:-false}"
         ;;
 
     jetson)

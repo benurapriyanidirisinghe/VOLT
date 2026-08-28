@@ -195,15 +195,40 @@ class BridgeIntegrationTests(unittest.TestCase):
 class WifiLaunchTests(unittest.TestCase):
     LAUNCH = ROOT / "launch" / "volt_wifi.launch.py"
 
-    def test_launch_file_exists_and_reuses_the_tested_stack(self):
+    def test_launch_file_reuses_the_tested_control_stack(self):
+        """Composed from control.launch.py, not restated node by node."""
         text = source(self.LAUNCH)
-        self.assertIn("volt_start.launch.py", text)
+        self.assertIn("control.launch.py", text)
         self.assertIn("board_endpoint", text)
+        self.assertIn("volt_serial_bridge.py", text)
+
+    def test_no_simulator_by_default(self):
+        """The hardware is open-loop, so Ignition renders the COMMANDED pose.
+
+        That is cost without evidence when the real robot is in front of you,
+        and it drags gz_ros2_control, robot_state_publisher and the clock
+        bridge into a stack with a 750 ms disarm deadline.
+        """
+        text = source(self.LAUNCH)
+        # Search the CODE, not the module docstring -- which mentions
+        # volt_start.launch.py precisely to explain why it is not used.
+        code = text.split('"""', 2)[-1]
+        # It must not go through volt_start.launch.py, which always brings
+        # Ignition up regardless of the gui argument.
+        self.assertNotIn("volt_start.launch.py", code)
+        gazebo_default = text[text.index('"gazebo",'):][:200]
+        self.assertIn('default_value="false"', gazebo_default)
+        # Still available on request for a demo.
+        self.assertIn("ignition.launch.py", text)
+        self.assertIn("condition=IfCondition(gazebo)", text)
 
     def test_defaults_to_dry_run_and_manual_arm(self):
         text = source(self.LAUNCH)
-        self.assertIn('"dry_run",\n            default_value="true"', text)
-        self.assertIn('"auto_arm": "false"', text)
+        for name, default in (("dry_run", "true"), ("auto_arm", "false"),
+                              ("auto_ready_pose", "false")):
+            block = text[text.index('"%s",' % name):][:260]
+            self.assertIn('default_value="%s"' % default, block,
+                          "%s must default to %s" % (name, default))
 
     def test_never_follows_a_simulation_clock(self):
         self.assertIn('"use_sim_time": "false"', source(self.LAUNCH))
