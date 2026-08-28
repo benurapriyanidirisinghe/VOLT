@@ -39,6 +39,11 @@ install(
 )
 
 install(
+  FILES scripts/volt_net_link.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   PROGRAMS scripts/volt_jetson_run.sh
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -76,6 +81,16 @@ install(
 add_test(
   NAME test_servo_calibration
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_servo_calibration.py
+)
+
+add_test(
+  NAME test_gamepad_bindings
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_gamepad_bindings.py
+)
+
+add_test(
+  NAME test_net_link
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_net_link.py
 )
 
 add_test(

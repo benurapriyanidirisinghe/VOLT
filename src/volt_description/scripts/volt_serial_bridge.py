@@ -13,6 +13,7 @@ from rclpy.node import Node
 from std_msgs.msg import ColorRGBA, Float64MultiArray, String, UInt8, UInt32
 
 from volt_kinematics import JOINT_NAMES
+from volt_net_link import NetLinkError, open_link, parse_endpoint
 from volt_servo_calibration import (
     CalibrationError,
     deadband_feedforward,
@@ -1126,10 +1127,18 @@ class VoltSerialBridge(Node):
             return False
         return self.send_next_face_command(now)
 
+    def link_is_network(self):
+        """True when ``port`` addresses an ESP32 over WiFi rather than a cable."""
+        try:
+            return parse_endpoint(self.port) is not None
+        except NetLinkError:
+            return False
+
     def connect(self):
         if self.dry_run or not self.hardware_enabled:
             return False
-        if serial is None:
+        network = self.link_is_network()
+        if serial is None and not network:
             self.last_error = "pyserial is not installed; install python3-serial."
             return False
         if not self.calibration_valid:
@@ -1142,19 +1151,29 @@ class VoltSerialBridge(Node):
         self.last_connect_attempt = now
 
         try:
-            probe_baud = self.baud_candidates[self.baud_index]
-            self.serial_port = serial.Serial(
-                self.port,
-                probe_baud,
-                timeout=self.serial_timeout,
-                write_timeout=self.serial_timeout,
-                exclusive=True,
-            )
-            self.serial_port.reset_input_buffer()
-            self.serial_port.reset_output_buffer()
-            # Opening a Nano commonly resets it. Clear stale bytes first, then
-            # preserve the firmware's startup identity banner during boot.
-            time.sleep(2.0)
+            if network:
+                # No baud to probe and no auto-reset to wait out: the board is
+                # already running when the socket opens.
+                probe_baud = 0
+                self.serial_port = open_link(
+                    self.port, timeout=self.serial_timeout or 4.0
+                )
+                self.serial_port.reset_input_buffer()
+                self.baud_locked = True
+            else:
+                probe_baud = self.baud_candidates[self.baud_index]
+                self.serial_port = serial.Serial(
+                    self.port,
+                    probe_baud,
+                    timeout=self.serial_timeout,
+                    write_timeout=self.serial_timeout,
+                    exclusive=True,
+                )
+                self.serial_port.reset_input_buffer()
+                self.serial_port.reset_output_buffer()
+                # Opening a Nano commonly resets it. Clear stale bytes first,
+                # then preserve the firmware's startup banner during boot.
+                time.sleep(2.0)
             self.connected = True
             self.connect_opened_time = time.monotonic()
             self.protocol.reset()
@@ -1166,10 +1185,16 @@ class VoltSerialBridge(Node):
             self.last_error = ""
             if not self.send_protocol_command("PING"):
                 return False
-            self.get_logger().info(
-                "Serial open on %s at %d baud; waiting for firmware "
-                "PONG/ready banner." % (self.port, probe_baud)
-            )
+            if network:
+                self.get_logger().info(
+                    "Network servo link open to %s; waiting for firmware "
+                    "PONG/ready banner." % self.port
+                )
+            else:
+                self.get_logger().info(
+                    "Serial open on %s at %d baud; waiting for firmware "
+                    "PONG/ready banner." % (self.port, probe_baud)
+                )
             return True
         except (SerialException, OSError) as exc:
             self.connected = False
@@ -1185,7 +1210,8 @@ class VoltSerialBridge(Node):
             self.serial_port = None
             self.last_error = str(exc)
             self.get_logger().warning(
-                "Waiting for Arduino on %s: %s" % (self.port, exc),
+                "Waiting for %s on %s: %s"
+                % ("ESP32" if network else "Arduino", self.port, exc),
                 throttle_duration_sec=5.0,
             )
             return False

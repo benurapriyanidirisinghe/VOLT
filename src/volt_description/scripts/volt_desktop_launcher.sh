@@ -130,6 +130,57 @@ if [ -z "${VOLT_IN_TERM:-}" ]; then
     [ -x "$RUNNER" ] || [ -f "$RUNNER" ] || die_dialog "Cannot find the VOLT runner:\n$RUNNER"
     VOLT_DRY="true"
 
+    if [ "$MODE" = "wifi" ]; then
+        BOARD="${VOLT_BOARD_ENDPOINT:-tcp://volt-esp32.local:3333}"
+        BOARD_HOST="$(printf '%s' "$BOARD" | sed 's#^[a-z0-9]*://##; s#:.*##')"
+        BOARD_PORT="$(printf '%s' "$BOARD" | sed 's#.*:##')"
+        case "$BOARD_PORT" in ''|*[!0-9]*) BOARD_PORT=3333 ;; esac
+        # Checked here, before a terminal opens, so an unreachable board is a
+        # dialog rather than a wall of retry warnings in a window.
+        if ! timeout 4 bash -c "</dev/tcp/$BOARD_HOST/$BOARD_PORT" 2>/dev/null; then
+            die_dialog \
+"Cannot reach the ESP32 servo board at $BOARD.
+
+Check that:
+  •  The board is powered and its LED shows it joined WiFi
+  •  It is on the same network as this PC
+  •  WIFI_SSID / WIFI_PASSWORD in the firmware are correct
+
+If mDNS is unreliable here, set the board IP instead:
+    VOLT_BOARD_ENDPOINT=tcp://192.168.2.NN:3333"
+        fi
+
+        CHOICE="$(zenity --question --width=560 --title="VOLT — ESP32 servo board over WiFi" \
+            --ok-label="Launch LIVE" --cancel-label="Cancel" \
+            --extra-button="Launch dry-run" \
+            --text="<b>This drives the robot over WiFi via $BOARD.</b>
+
+Everything runs on this PC; the ESP32 is the servo board.
+
+Build and simulation success do <b>not</b> establish that a servo mapping,
+direction, trim, or mechanical limit is safe.
+
+<b>WiFi adds a failure mode a cable does not have.</b> If the link stalls,
+the board disarms after 750 ms with the legs wherever they were. Keep the
+robot raised and the servo-power disconnect within reach.
+
+Before continuing:
+  •  Raise the robot so its feet cannot reach the ground
+  •  Keep the servo-power disconnect within reach
+  •  Expect to ARM manually — no motion happens until you do
+
+<i>Launch dry-run</i> starts the identical stack with servo writes logged
+instead of sent." 2>/dev/null)"
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            VOLT_DRY="false"
+        elif [ "$CHOICE" = "Launch dry-run" ]; then
+            VOLT_DRY="true"
+        else
+            exit 0
+        fi
+    fi
+
     if [ "$MODE" = "jetson" ]; then
         # The Arduino is on the Jetson in this mode, so the port check and
         # the reachability check both happen over SSH inside the runner.
@@ -199,6 +250,7 @@ instead of sent. Nothing reaches the hardware." 2>/dev/null)"
     TITLE="VOLT — ${MODE}"
     [ "$MODE" = "physical" ] && [ "$VOLT_DRY" = "false" ] && TITLE="VOLT — PHYSICAL (LIVE SERVOS)"
     [ "$MODE" = "jetson" ] && TITLE="VOLT — JETSON$([ "$VOLT_DRY" = "false" ] && echo " (LIVE SERVOS)")"
+    [ "$MODE" = "wifi" ] && TITLE="VOLT — ESP32 WiFi$([ "$VOLT_DRY" = "false" ] && echo " (LIVE SERVOS)")"
     INNER="VOLT_IN_TERM=1 VOLT_DRY='$VOLT_DRY' '$0' '$MODE'; echo; \
 echo '[VOLT] stack exited. Press Enter to close this window.'; read -r"
     open_terminal "$TITLE" "$INNER"
@@ -254,6 +306,18 @@ case "$MODE" in
             --gazebo-gui true --use-hardware true --dry-run true --serial-port "$PORT"
         ;;
 
+    wifi)
+        sweep_orphans
+        BOARD="${VOLT_BOARD_ENDPOINT:-tcp://volt-esp32.local:3333}"
+        if [ "$VOLT_DRY" = "false" ]; then
+            echo "[VOLT] LIVE servo bridge over WiFi to $BOARD -- ARM manually in the GUI"
+        else
+            echo "[VOLT] dry-run over WiFi to $BOARD -- servo writes are logged, not sent"
+        fi
+        exec ros2 launch volt_description volt_wifi.launch.py \
+            board_endpoint:="$BOARD" dry_run:="$VOLT_DRY"
+        ;;
+
     jetson)
         # Deliberately no sweep_orphans: this mode starts nothing locally
         # that the sweep targets except the console, and the runner's own
@@ -264,7 +328,7 @@ case "$MODE" in
         ;;
 
     *)
-        echo "[VOLT] unknown mode '$MODE' (expected sim, gui, physical, or jetson)"
+        echo "[VOLT] unknown mode '$MODE' (expected sim, gui, physical, jetson, or wifi)"
         exit 2
         ;;
 esac

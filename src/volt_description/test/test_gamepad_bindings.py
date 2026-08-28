@@ -545,3 +545,7 @@ class AxisConsoleTests(unittest.TestCase):
         self.assertIn("def set_axes(self, values, axis_bindings=None)", self.source)
         self.assertIn("PAD_STICK_AXES = ((0, 1), (2, 3))", self.source)
         self.assertIn("PAD_AXIS_TOKENS", self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()

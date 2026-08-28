@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VOLT WiFi Robot
+GenericName=VOLT quadruped (ESP32 servo board)
+Comment=Drives the robot over WiFi via the ESP32-S3 board. Raise the robot before arming.
+Exec=/home/ros2/Documents/volt_ws/src/volt_description/scripts/volt_desktop_launcher.sh wifi
+Icon=/home/ros2/Documents/volt_ws/src/volt_description/icons/volt-wifi.png
+Terminal=false
+StartupNotify=true
+Categories=Development;
+Keywords=VOLT;ROS;quadruped;robot;esp32;wifi;

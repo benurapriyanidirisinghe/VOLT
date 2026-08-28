@@ -707,12 +707,19 @@ if __name__ == "__main__":
 class FirmwareGuardMirrorTests(unittest.TestCase):
     """The host mirror of the firmware travel guard must not drift."""
 
+    FIRMWARES = (
+        ("volt_arduino_pca9685", "volt_arduino_pca9685.ino"),
+        ("volt_esp32_pca9685", "volt_esp32_pca9685.ino"),
+    )
+
     @staticmethod
-    def _firmware_table(name):
+    def _firmware_table(name, sketch=None):
+        directory, filename = sketch or (
+            "volt_arduino_pca9685", "volt_arduino_pca9685.ino"
+        )
         source = (
             Path(__file__).resolve().parents[3]
-            / "firmware" / "volt_arduino_pca9685"
-            / "volt_arduino_pca9685.ino"
+            / "firmware" / directory / filename
         ).read_text()
         match = re.search(
             r"const float %s\[CHANNEL_COUNT\] = \{(.*?)\};" % name,
@@ -724,6 +731,30 @@ class FirmwareGuardMirrorTests(unittest.TestCase):
             float(value)
             for value in re.findall(r"-?\d+\.?\d*", match.group(1))
         )
+
+    def test_every_firmware_agrees_on_the_travel_guards(self):
+        """The guards protect one robot, so they cannot differ per board.
+
+        The ESP32 board replaces the Arduino on the same mechanism. A guard
+        that is right on one and wrong on the other is a leg that jams only
+        on the transport nobody tested that day.
+        """
+        root = Path(__file__).resolve().parents[3] / "firmware"
+        present = [
+            sketch for sketch in self.FIRMWARES
+            if (root / sketch[0] / sketch[1]).is_file()
+        ]
+        self.assertTrue(present, "no firmware sketches found")
+        for table in ("CHANNEL_MIN_DEG", "CHANNEL_MAX_DEG",
+                      "CHANNEL_SAFE_START_DEG"):
+            values = {
+                sketch[0]: self._firmware_table(table, sketch)
+                for sketch in present
+            }
+            self.assertEqual(
+                1, len(set(values.values())),
+                "%s differs between firmwares: %s" % (table, values),
+            )
 
     def test_mirror_matches_the_firmware_tables(self):
         """A silent clamp is only visible if the mirror stays in sync.
