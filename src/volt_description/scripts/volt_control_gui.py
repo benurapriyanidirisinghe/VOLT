@@ -1197,6 +1197,8 @@ class VoltControlWindow(QMainWindow):
         self.console_host = socket.gethostname()
         self.robot_host = ""
         self.bridge_host = ""
+        self.board_wifi_ssid = ""
+        self.board_wifi_rssi = 0
         self.motion_status_rate = 0.0
         self.motion_status_window_start = 0.0
         self.motion_status_window_count = 0
@@ -2978,6 +2980,11 @@ class VoltControlWindow(QMainWindow):
         # reports here so the GUI can name it in the gate banner.
         self.firmware_guard_clip = fields.get("guard_clip", "-")
         self.bridge_host = fields.get("host", "")
+        self.board_wifi_ssid = fields.get("fw_wifi_ssid", "")
+        try:
+            self.board_wifi_rssi = int(float(fields.get("fw_wifi_rssi", 0)))
+        except (TypeError, ValueError):
+            self.board_wifi_rssi = 0
         label = getattr(self, "firmware_link_label", None)
         if label is None or "fw_crc_fail" not in fields:
             return
@@ -6005,6 +6012,13 @@ class VoltControlWindow(QMainWindow):
             colour = "#fca5a5"
             state = "SPLIT MISMATCH (bridge on %s)" % self.bridge_host
 
+        # On the ESP32 link, signal strength is what predicts a stall, so it
+        # rides along with the freshness rather than hiding in DIAGNOSTICS.
+        if self.board_wifi_ssid and self.board_wifi_ssid != "-":
+            rssi = self.board_wifi_rssi
+            state += "  wifi %s %d dBm" % (self.board_wifi_ssid, rssi)
+            if rssi and rssi < -75 and colour == "#86efac":
+                colour = "#fbbf24"
         label.setText("Robot link:  %s  [%s]  %s" % (where, kind, state))
         label.setStyleSheet("color: %s; font-weight: bold;" % colour)
         label.setToolTip(

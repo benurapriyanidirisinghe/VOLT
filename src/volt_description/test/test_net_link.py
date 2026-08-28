@@ -261,6 +261,50 @@ class Esp32FirmwareTests(unittest.TestCase):
             self.assertNotIn(token, self.text)
         self.assertIn("ESP.getFreeHeap()", self.text)
 
+    def test_scans_before_joining(self):
+        """A join failure must be diagnosable, not a bare timeout."""
+        self.assertIn("int scanAndReportNetworks()", self.text)
+        self.assertIn("WiFi.scanNetworks()", self.text)
+        self.assertIn("bool joinBestNetwork()", self.text)
+        join = self.text[self.text.index("bool joinBestNetwork()"):][:1400]
+        self.assertIn("scanAndReportNetworks()", join)
+
+    def test_supports_several_configured_networks(self):
+        self.assertIn("struct WifiNetwork", self.text)
+        self.assertIn("WIFI_NETWORKS[]", self.text)
+        self.assertIn("WIFI_NETWORK_COUNT", self.text)
+
+    def test_joins_the_strongest_visible_network_not_the_first(self):
+        """Joining a weak AP when a strong one is present stutters the stream."""
+        chooser = self.text[self.text.index("int bestVisibleNetwork"):][:900]
+        self.assertIn("WiFi.RSSI(index)", chooser)
+        self.assertIn("rssi > bestRssi", chooser)
+
+    def test_scan_never_runs_while_servos_are_being_driven(self):
+        """scanNetworks() blocks for seconds; that would trip the 750 ms disarm."""
+        service = self.text[self.text.index("void serviceNetwork()"):][:1800]
+        # The only in-loop rescan sits behind "no WiFi connection", where by
+        # definition no host is streaming frames.
+        rescan = service.index("joinBestNetwork();")
+        disconnected = service.index("WiFi.status() != WL_CONNECTED")
+        self.assertLess(disconnected, rescan)
+
+    def test_reports_link_quality_in_status(self):
+        status = self.text[self.text.index("void printStatus()"):][:2500]
+        for field in ("WIFI_SSID=", "WIFI_RSSI=", "WIFI_IP="):
+            self.assertIn(field, status)
+
+    def test_status_field_names_survive_the_host_parser(self):
+        """The host regex is [A-Z_]+=; a digit in a name silently drops it."""
+        import re
+        for field in ("WIFI_SSID", "WIFI_RSSI", "WIFI_IP"):
+            self.assertTrue(re.fullmatch(r"[A-Z_]+", field), field)
+
+    def test_host_forwards_the_wifi_fields(self):
+        protocol = source(ROOT / "scripts" / "volt_serial_protocol.py")
+        for field in ("WIFI_SSID", "WIFI_RSSI", "WIFI_IP"):
+            self.assertIn('"%s",' % field, protocol)
+
     def test_psram_pins_are_not_used_for_io(self):
         """GPIO 35/36/37 carry octal PSRAM on the N16R8 module."""
         for name in ("PIN_I2C_SDA", "PIN_I2C_SCL"):

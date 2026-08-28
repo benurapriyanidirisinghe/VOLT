@@ -687,9 +687,41 @@ class BinaryFrameTests(unittest.TestCase):
         self.assertIn("crc ^= 0x8C;", firmware)
         # Silent-drop contract: the binary reject path must never print.
         self.assertNotIn("ERR CRC", firmware)
-        flat = firmware.replace('F(" ', '').replace('")', '')
+        # The forwarded counter list now spans two boards with different
+        # capabilities: the Nano has no radio, so WIFI_* exists only on the
+        # ESP32. The contract is that every counter is emitted by SOME
+        # firmware, and that transport-specific ones sit on the right board.
+        root = Path(__file__).resolve().parents[3] / "firmware"
+        sketches = {
+            "arduino": firmware,
+            "esp32": (
+                root / "volt_esp32_pca9685" / "volt_esp32_pca9685.ino"
+            ).read_text(encoding="utf-8"),
+        }
+        flat = {
+            name: text.replace('F(" ', '').replace('")', '')
+            for name, text in sketches.items()
+        }
         for counter in FIRMWARE_COUNTER_FIELDS:
-            self.assertIn(counter + "=", flat)
+            emitters = [
+                name for name, text in flat.items() if counter + "=" in text
+            ]
+            self.assertTrue(
+                emitters,
+                "%s is forwarded to the console but no firmware emits it"
+                % counter,
+            )
+            if counter.startswith("WIFI_"):
+                self.assertEqual(
+                    ["esp32"], emitters,
+                    "%s is a WiFi field; the cabled board must not claim it"
+                    % counter,
+                )
+            else:
+                self.assertIn(
+                    "arduino", emitters,
+                    "%s must still be emitted by the cabled board" % counter,
+                )
             # _STATUS_FIELD is r"\b([A-Z_]+)=..." so a digit anywhere in a
             # field name makes it silently unparseable. I2C_MAX_US was lost
             # to exactly that and reported as "?" in the GUI.

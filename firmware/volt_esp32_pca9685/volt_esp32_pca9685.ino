@@ -31,8 +31,32 @@
 // Set these before flashing. Kept as plain constants rather than a captive
 // portal: a robot that can be joined to an arbitrary network by anyone in
 // range is not what this is for.
-const char WIFI_SSID[] = "CHANGE_ME";
-const char WIFI_PASSWORD[] = "CHANGE_ME";
+// Several may be listed. The board scans, then joins the STRONGEST one it
+// can actually see, rather than the first that happens to be at the top --
+// a robot carried between a bench and a floor should not need reflashing,
+// and joining a weak AP when a strong one is present is how a 60 Hz stream
+// starts stuttering.
+struct WifiNetwork {
+  const char *ssid;
+  const char *password;
+};
+
+const WifiNetwork WIFI_NETWORKS[] = {
+  {"CHANGE_ME", "CHANGE_ME"},
+  // {"workshop-2g", "..."},
+  // {"phone-hotspot", "..."},
+};
+const uint8_t WIFI_NETWORK_COUNT =
+  sizeof(WIFI_NETWORKS) / sizeof(WIFI_NETWORKS[0]);
+
+// 2.4 GHz only, deliberately: the S3 has no 5 GHz radio, so a 5 GHz-only AP
+// is invisible no matter how close it is. The scan report says so rather
+// than leaving that as a mystery.
+const int8_t WIFI_WEAK_RSSI = -75;   // below this, warn that the link is marginal
+
+// Which network was joined, for STATUS and for the scan report.
+char wifiJoinedSsid[33] = "";
+int32_t wifiJoinedRssi = 0;
 
 // The host connects to this port. Must match the tcp:// endpoint the bridge
 // is given (volt_wifi.launch.py / the VOLT WiFi Robot icon).
@@ -1127,6 +1151,21 @@ void printStatus() {
   Host.print(ledShowCount);
   Host.print(F(" SRAM_FREE="));
   Host.print(freeSramBytes());
+  // Link quality travels with every STATUS. On a cable this had no
+  // equivalent; on WiFi it is the number that predicts frame drops, and the
+  // host's status parser accepts any [A-Z_]+=value pair, so it reaches the
+  // console without a protocol change. RSSI is read live rather than cached:
+  // the robot moves, and so does the number.
+  Host.print(F(" WIFI_SSID="));
+  Host.print(wifiJoinedSsid[0] ? wifiJoinedSsid : "-");
+  Host.print(F(" WIFI_RSSI="));
+  Host.print(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
+  Host.print(F(" WIFI_IP="));
+  if (WiFi.status() == WL_CONNECTED) {
+    Host.print(WiFi.localIP());
+  } else {
+    Host.print(F("-"));
+  }
   maxLoopUs = 0;
   maxI2cUs = 0;
   printFaceStatusFields();
@@ -1799,6 +1838,125 @@ bool faceWindowSafe() {
   return (frameIntervalUs - since) >= FACE_SHOW_GUARD_US;
 }
 
+// Scanning blocks for seconds. That is fine at boot and during a join
+// retry, when nothing is armed, and it is NOT fine while servos are being
+// driven -- a stalled loop starves the 60 Hz stream and trips
+// COMMAND_TIMEOUT_MS. Every caller must be one of those safe cases.
+int scanAndReportNetworks() {
+  Serial.println(F("[volt] scanning 2.4 GHz networks..."));
+  const int found = WiFi.scanNetworks();
+  if (found <= 0) {
+    Serial.println(F("[volt] no networks visible."));
+    Serial.println(F("[volt] the S3 radio is 2.4 GHz only -- a 5 GHz-only"));
+    Serial.println(F("[volt] access point cannot be seen from here."));
+    WiFi.scanDelete();
+    return found;
+  }
+
+  Serial.print(F("[volt] "));
+  Serial.print(found);
+  Serial.println(F(" network(s) visible:"));
+  Serial.println(F("       RSSI  CH  ENC  KNOWN  SSID"));
+  for (int index = 0; index < found; ++index) {
+    const int32_t rssi = WiFi.RSSI(index);
+    Serial.print(F("      "));
+    Serial.print(rssi);
+    Serial.print(F("  "));
+    Serial.print(WiFi.channel(index));
+    Serial.print(WiFi.encryptionType(index) == WIFI_AUTH_OPEN
+                   ? F("  open ") : F("  wpa  "));
+    Serial.print(configuredIndexFor(WiFi.SSID(index).c_str()) >= 0
+                   ? F("  yes  ") : F("   no   "));
+    Serial.print(WiFi.SSID(index));
+    if (rssi < WIFI_WEAK_RSSI) {
+      Serial.print(F("   (weak)"));
+    }
+    Serial.println();
+  }
+  return found;
+}
+
+// Index into WIFI_NETWORKS for an SSID, or -1 when it is not configured.
+int configuredIndexFor(const char *ssid) {
+  if (ssid == nullptr) {
+    return -1;
+  }
+  for (uint8_t index = 0; index < WIFI_NETWORK_COUNT; ++index) {
+    if (strcmp(WIFI_NETWORKS[index].ssid, ssid) == 0) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+// Pick the configured network with the strongest signal that is actually
+// on the air. Returns -1 when none of them are visible, which is a much
+// more useful thing to report than a bare join timeout.
+int bestVisibleNetwork(int scanCount, int32_t *rssiOut) {
+  int bestConfigured = -1;
+  int32_t bestRssi = -1000;
+  for (int index = 0; index < scanCount; ++index) {
+    const int configured = configuredIndexFor(WiFi.SSID(index).c_str());
+    if (configured < 0) {
+      continue;
+    }
+    const int32_t rssi = WiFi.RSSI(index);
+    if (rssi > bestRssi) {
+      bestRssi = rssi;
+      bestConfigured = configured;
+    }
+  }
+  if (bestConfigured >= 0 && rssiOut != nullptr) {
+    *rssiOut = bestRssi;
+  }
+  return bestConfigured;
+}
+
+bool joinBestNetwork() {
+  const int found = scanAndReportNetworks();
+  int32_t rssi = 0;
+  const int choice = bestVisibleNetwork(found, &rssi);
+  WiFi.scanDelete();
+
+  if (choice < 0) {
+    Serial.println(F("[volt] none of the configured networks are visible."));
+    Serial.println(F("[volt] check WIFI_NETWORKS in this sketch against the"));
+    Serial.println(F("[volt] scan above; SSIDs are case sensitive."));
+    wifiJoinedSsid[0] = '\0';
+    wifiJoinedRssi = 0;
+    return false;
+  }
+
+  Serial.print(F("[volt] joining "));
+  Serial.print(WIFI_NETWORKS[choice].ssid);
+  Serial.print(F(" at "));
+  Serial.print(rssi);
+  Serial.println(F(" dBm"));
+  if (rssi < WIFI_WEAK_RSSI) {
+    Serial.println(F("[volt] WARNING: weak signal. Expect frame drops and"));
+    Serial.println(F("[volt] a 750 ms disarm if the link stalls."));
+  }
+
+  WiFi.begin(WIFI_NETWORKS[choice].ssid, WIFI_NETWORKS[choice].password);
+  const uint32_t deadline = millis() + 15000UL;
+  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
+    delay(200);
+    Serial.print('.');
+  }
+  Serial.println();
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("[volt] join failed (wrong password?)"));
+    wifiJoinedSsid[0] = '\0';
+    wifiJoinedRssi = 0;
+    return false;
+  }
+  strncpy(wifiJoinedSsid, WIFI_NETWORKS[choice].ssid,
+          sizeof(wifiJoinedSsid) - 1);
+  wifiJoinedSsid[sizeof(wifiJoinedSsid) - 1] = '\0';
+  wifiJoinedRssi = WiFi.RSSI();
+  return true;
+}
+
 void startNetwork() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
@@ -1808,19 +1966,8 @@ void startNetwork() {
     // milliseconds of jitter, which a 60 Hz servo stream shows as a stutter.
     WiFi.setSleep(false);
   }
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print(F("[volt] joining "));
-  Serial.println(WIFI_SSID);
 
-  // Bounded: a board that never joins must still run its loop, hold the safe
-  // pose and keep answering on USB, not sit in setup() forever.
-  const uint32_t deadline = millis() + 20000UL;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay(200);
-    Serial.print('.');
-  }
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
+  if (joinBestNetwork()) {
     Serial.print(F("[volt] ip "));
     Serial.print(WiFi.localIP());
     Serial.print(F("  host "));
@@ -1828,7 +1975,9 @@ void startNetwork() {
     Serial.print(F(".local  port "));
     Serial.println(VOLT_TCP_PORT);
   } else {
-    Serial.println(F("[volt] WiFi join failed; retrying in loop()"));
+    // Not fatal: the loop still runs, the servos hold their safe pose and
+    // the USB console still reports. serviceNetwork() keeps retrying.
+    Serial.println(F("[volt] not joined; retrying from loop()"));
   }
   voltServer.begin();
   voltServer.setNoDelay(true);
@@ -1840,11 +1989,15 @@ void serviceNetwork() {
       voltClient.stop();
       onHostDisconnected();
     }
+    // Rescan rather than retrying one remembered SSID: the network may have
+    // changed channel, or a second configured AP may now be the strong one.
+    // Safe to block here -- reaching this branch means there is no host, so
+    // nothing is armed and no servo stream is being starved.
     static uint32_t lastRetryMs = 0;
-    if (millis() - lastRetryMs > 5000UL) {
+    if (millis() - lastRetryMs > 8000UL) {
       lastRetryMs = millis();
       WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      joinBestNetwork();
     }
     return;
   }

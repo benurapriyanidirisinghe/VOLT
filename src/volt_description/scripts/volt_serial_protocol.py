@@ -213,6 +213,13 @@ FIRMWARE_COUNTER_FIELDS = (
     "BUS_MAX_US",
     "LED_SHOWS",
     "SRAM_FREE",
+    # WiFi transport only; the Arduino simply never emits these and the
+    # parser skips what is absent. RSSI is the number that predicts frame
+    # drops on the ESP32 link, so it belongs next to CRC_FAIL and SEQ_GAP
+    # rather than in a separate channel.
+    "WIFI_SSID",
+    "WIFI_RSSI",
+    "WIFI_IP",
 )
 
 
