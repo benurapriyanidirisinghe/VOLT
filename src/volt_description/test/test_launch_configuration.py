@@ -455,3 +455,23 @@ class SplitJetsonStackTests(unittest.TestCase):
                 (ROOT / name / ".gitkeep").is_file(),
                 "%s/.gitkeep is what makes a clean clone buildable" % name,
             )
+
+    def test_teardown_is_armed_before_any_check_that_can_die(self):
+        """A preflight failure must still clear a previous run's stack.
+
+        The port check dies when no Arduino is on the Jetson. If the trap
+        were installed after it, that abort would leave an earlier stack
+        streaming frames to a robot with no console attached.
+        """
+        runner = source(ROOT / "scripts" / "volt_jetson_run.sh")
+        trap = runner.index("trap stop_remote EXIT INT TERM")
+        port_check = runner.index("no /dev/ttyUSB* or /dev/ttyACM* on the Jetson")
+        workspace_check = runner.index("is not built on the Jetson")
+        self.assertLess(trap, port_check)
+        self.assertLess(trap, workspace_check)
+
+    def test_runner_provisions_the_dds_profile_on_the_jetson(self):
+        """Shared memory cannot cross a network; UDP-only is not optional."""
+        runner = source(ROOT / "scripts" / "volt_jetson_run.sh")
+        self.assertIn("useBuiltinTransports>false", runner)
+        self.assertIn("FASTRTPS_DEFAULT_PROFILES_FILE", runner)

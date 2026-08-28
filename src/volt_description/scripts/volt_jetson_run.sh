@@ -48,6 +48,52 @@ remote true 2>/dev/null || die \
 Check the Jetson is powered and on the same network, then install a key:
     ssh-copy-id $TARGET"
 
+# ------------------------------------------------------------- teardown --
+# Defined and armed BEFORE any check that can die. A preflight failure must
+# still clear a stack left running by an earlier launch -- otherwise "no
+# Arduino" aborts the console while the Jetson keeps streaming frames.
+stop_remote() {
+    local pgid
+    pgid="$(remote "cat $PGID_FILE 2>/dev/null" 2>/dev/null || true)"
+    if [ -n "$pgid" ]; then
+        say "stopping the robot stack on the Jetson (pgid $pgid)"
+        # SIGINT first so the bridge can send its HOLD and the firmware
+        # disarms cleanly rather than timing out.
+        remote "kill -INT -$pgid 2>/dev/null || true" 2>/dev/null || true
+        sleep 3
+        remote "kill -9 -$pgid 2>/dev/null || true; rm -f $PGID_FILE" 2>/dev/null || true
+    fi
+}
+trap stop_remote EXIT INT TERM
+
+stop_remote   # clear anything a previous run left behind
+
+# The UDP-only profile must exist on BOTH machines. On the robot it is
+# required regardless -- Fast DDS shared memory rots across a kill -9 and the
+# segments are shared with the ros_nav station -- and for a split stack it is
+# also the only thing that works, since shared memory cannot cross a network.
+# Written here rather than assumed so a freshly imaged Jetson just works.
+remote "mkdir -p \$HOME/.config/volt && cat > $REMOTE_DDS <<'VOLTDDS'
+<?xml version=\"1.0\" encoding=\"UTF-8\" ?>
+<dds xmlns=\"http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles\">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name=\"udp_participant\" is_default_profile=\"true\">
+      <rtps>
+        <userTransports><transport_id>udp_only</transport_id></userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>
+VOLTDDS" 2>/dev/null || die "could not write the DDS profile on the Jetson"
+
+# ------------------------------------------------------- remaining checks --
 # The workspace has to exist and be built, or the launch below fails with a
 # far less obvious message than this one.
 remote "test -f '$JETSON_WS/install/setup.bash'" 2>/dev/null || die \
@@ -75,22 +121,6 @@ say "Arduino on the Jetson at $PORT"
     || say "dry-run bridge -- servo writes are logged on the Jetson, not sent"
 
 # ------------------------------------------------------------- remote half --
-stop_remote() {
-    local pgid
-    pgid="$(remote "cat $PGID_FILE 2>/dev/null" 2>/dev/null || true)"
-    if [ -n "$pgid" ]; then
-        say "stopping the robot stack on the Jetson (pgid $pgid)"
-        # SIGINT first so the bridge can send its HOLD and the firmware
-        # disarms cleanly rather than timing out.
-        remote "kill -INT -$pgid 2>/dev/null || true" 2>/dev/null || true
-        sleep 3
-        remote "kill -9 -$pgid 2>/dev/null || true; rm -f $PGID_FILE" 2>/dev/null || true
-    fi
-}
-trap stop_remote EXIT INT TERM
-
-stop_remote   # clear anything a previous run left behind
-
 REMOTE_CMD="
 set -e
 source /opt/ros/humble/setup.bash
