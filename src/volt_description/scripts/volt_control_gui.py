@@ -13,8 +13,8 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import rclpy
 from geometry_msgs.msg import Twist
-from PyQt5.QtCore import QEvent, QPointF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from PyQt5.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -448,6 +448,260 @@ def arduino_connection_view(fields):
     if not hardware_enabled:
         return "DISCONNECTED — hardware mode disabled", "#94a3b8"
     return "DISCONNECTED — check USB / serial port", "#fca5a5"
+
+
+# Normalised controller geometry, 1000 x 620. One table drives the drawing,
+# the hit testing and the callout lines, so a control can never be painted in
+# one place and clickable in another.
+#
+# Indices follow the layout pygame reports for the usual XInput-style pads,
+# which is what DEFAULT_BINDINGS was written against: 0-3 face, 4/5 bumpers,
+# 6/7 back+start, 8/9 stick presses, 10 guide.
+PAD_CONTROLS = (
+    # (input name, x, y, radius, glyph, label side, label row)
+    ("button_3", 990, 232, 30, "Y", "right", 0),
+    ("button_1", 1038, 280, 30, "B", "right", 1),
+    ("button_0", 990, 328, 30, "A", "right", 2),
+    ("button_2", 942, 280, 30, "X", "right", 3),
+    ("button_5", 1000, 150, 34, "RB", "right", 4),
+    ("button_7", 892, 214, 22, "\u2261", "right", 5),
+    ("button_9", 900, 410, 40, "R3", "right", 6),
+    ("hat_up", 600, 236, 24, "\u25b2", "left", 0),
+    ("hat_left", 556, 280, 24, "\u25c0", "left", 1),
+    ("hat_down", 600, 324, 24, "\u25bc", "left", 2),
+    ("hat_right", 644, 280, 24, "\u25b6", "left", 3),
+    ("button_4", 600, 150, 34, "LB", "left", 4),
+    ("button_6", 708, 214, 22, "\u25a3", "left", 5),
+    ("button_8", 700, 410, 40, "L3", "left", 6),
+    ("button_10", 800, 360, 22, "\u25c9", "left", 7),
+)
+
+# The space is wider than the controller on purpose: the outer 290 units on
+# each side are label gutters. Callout text drawn outside the coordinate
+# space is text the widget clips, which is what the first cut did.
+PAD_W, PAD_H = 1600.0, 620.0
+PAD_LABEL_X = 290.0
+
+
+class GamepadDiagram(QWidget):
+    """A clickable controller map for the binding tab.
+
+    Drawn rather than shipped as an image on purpose: the same coordinate
+    table produces the artwork, the hit regions and the callout lines, so
+    they cannot drift, and the whole thing recolours with the theme and
+    stays sharp at any size. It also lets a control light up the instant it
+    is physically pressed, which is how an operator identifies a button
+    without knowing its number.
+    """
+
+    controlClicked = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(300)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.bindings = {}
+        self.pressed = set()
+        self.selected = ""
+        self.hovered = ""
+
+    # -- state ---------------------------------------------------------
+    def set_bindings(self, bindings):
+        self.bindings = dict(bindings)
+        self.update()
+
+    def set_pressed(self, names):
+        names = set(names)
+        if names != self.pressed:
+            self.pressed = names
+            self.update()
+
+    def set_selected(self, name):
+        if name != self.selected:
+            self.selected = name
+            self.update()
+
+    # -- geometry ------------------------------------------------------
+    def _scale(self):
+        margin = 8.0
+        usable_w = max(1.0, self.width() - 2 * margin)
+        usable_h = max(1.0, self.height() - 2 * margin)
+        factor = min(usable_w / PAD_W, usable_h / PAD_H)
+        return (
+            factor,
+            margin + (usable_w - PAD_W * factor) / 2.0,
+            margin + (usable_h - PAD_H * factor) / 2.0,
+        )
+
+    def _point(self, x, y):
+        factor, dx, dy = self._scale()
+        return QPointF(x * factor + dx, y * factor + dy)
+
+    def control_at(self, position):
+        factor, _dx, _dy = self._scale()
+        for name, x, y, radius, _glyph, _side, _row in PAD_CONTROLS:
+            centre = self._point(x, y)
+            grab = max(radius * factor, 11.0)
+            if (position.x() - centre.x()) ** 2 + (
+                position.y() - centre.y()
+            ) ** 2 <= grab * grab:
+                return name
+        return ""
+
+    # -- events --------------------------------------------------------
+    def mousePressEvent(self, event):
+        name = self.control_at(event.pos())
+        if name:
+            self.set_selected(name)
+            self.controlClicked.emit(name)
+
+    def mouseMoveEvent(self, event):
+        name = self.control_at(event.pos())
+        if name != self.hovered:
+            self.hovered = name
+            self.setToolTip(
+                "%s -> %s" % (
+                    input_caption(name),
+                    ACTION_CAPTIONS.get(self.bindings.get(name, ""), "unbound"),
+                ) if name else ""
+            )
+            self.update()
+
+    def leaveEvent(self, _event):
+        if self.hovered:
+            self.hovered = ""
+            self.update()
+
+    # -- painting ------------------------------------------------------
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        factor, _dx, _dy = self._scale()
+
+        outline = QColor("#3d4b5c")
+        body = QColor("#111821")
+        painter.fillRect(self.rect(), QColor("#0d131a"))
+
+        # Body: two grips under a slab, drawn as one path so the silhouette
+        # reads as a controller rather than a pile of circles.
+        path = QPainterPath()
+        path.moveTo(self._point(550, 150))
+        path.cubicTo(self._point(680, 118), self._point(920, 118),
+                     self._point(1050, 150))
+        path.cubicTo(self._point(1130, 178), self._point(1180, 250),
+                     self._point(1158, 330))
+        path.cubicTo(self._point(1140, 470), self._point(1060, 560),
+                     self._point(972, 540))
+        path.cubicTo(self._point(910, 522), self._point(896, 452),
+                     self._point(856, 430))
+        path.cubicTo(self._point(820, 412), self._point(780, 412),
+                     self._point(744, 430))
+        path.cubicTo(self._point(704, 452), self._point(690, 522),
+                     self._point(628, 540))
+        path.cubicTo(self._point(540, 560), self._point(460, 470),
+                     self._point(442, 330))
+        path.cubicTo(self._point(420, 250), self._point(470, 178),
+                     self._point(550, 150))
+        painter.setPen(QPen(outline, max(1.6, 2.0 * factor)))
+        painter.setBrush(QBrush(body))
+        painter.drawPath(path)
+
+        # Touchpad slab, purely cosmetic: it anchors the eye the way the
+        # real controller does.
+        painter.setPen(QPen(QColor("#28323d"), max(1.0, 1.4 * factor)))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(self._point(730, 196), self._point(870, 268)),
+            6.0 * factor, 6.0 * factor,
+        )
+
+        label_font = QFont(self.font())
+        label_font.setPointSizeF(max(7.0, 8.6 * factor * 1.6))
+        glyph_font = QFont(self.font())
+        glyph_font.setPointSizeF(max(6.5, 8.0 * factor * 1.6))
+        glyph_font.setBold(True)
+
+        rows_left = sum(1 for c in PAD_CONTROLS if c[5] == "left")
+        rows_right = sum(1 for c in PAD_CONTROLS if c[5] == "right")
+
+        for name, x, y, radius, glyph, side, row in PAD_CONTROLS:
+            centre = self._point(x, y)
+            r = max(7.0, radius * factor)
+            action = self.bindings.get(name, "")
+            is_pressed = name in self.pressed
+            is_selected = name == self.selected
+            is_stop = action == "stop"
+
+            if is_pressed:
+                fill, edge = QColor("#86efac"), QColor("#bbf7d0")
+            elif is_selected:
+                fill, edge = QColor("#1e3a5f"), QColor("#7dd3fc")
+            elif is_stop:
+                fill, edge = QColor("#3f1d1d"), QColor("#fca5a5")
+            elif action:
+                fill, edge = QColor("#1b2531"), QColor("#64748b")
+            else:
+                fill, edge = QColor("#141b24"), QColor("#33414f")
+            if name == self.hovered and not is_pressed:
+                edge = QColor("#e2e8f0")
+
+            painter.setPen(QPen(edge, max(1.4, (2.4 if is_selected else 1.7) * factor)))
+            painter.setBrush(QBrush(fill))
+            painter.drawEllipse(centre, r, r)
+
+            painter.setFont(glyph_font)
+            painter.setPen(QPen(QColor("#0b1118") if is_pressed else QColor("#94a3b8")))
+            painter.drawText(
+                QRectF(centre.x() - r, centre.y() - r, r * 2, r * 2),
+                Qt.AlignCenter, glyph,
+            )
+
+            # Callout: leader line out to a label column, the way a controller
+            # map in a game shows its bindings.
+            total = rows_left if side == "left" else rows_right
+            span_top, span_bottom = 60.0, PAD_H - 40.0
+            step = (span_bottom - span_top) / max(1, total - 1) if total > 1 else 0
+            label_y = span_top + row * step
+            edge_x = PAD_LABEL_X if side == "left" else PAD_W - PAD_LABEL_X
+            elbow = self._point(edge_x + (70 if side == "left" else -70), label_y)
+            anchor_point = self._point(edge_x, label_y)
+
+            painter.setPen(QPen(
+                QColor("#86efac") if is_pressed
+                else QColor("#7dd3fc") if is_selected
+                else QColor("#334155"),
+                max(1.0, 1.3 * factor),
+            ))
+            painter.drawLine(centre, elbow)
+            painter.drawLine(elbow, anchor_point)
+
+            painter.setFont(label_font)
+            caption = ACTION_CAPTIONS.get(action, "")
+            if not action:
+                caption = "unbound"
+            text = "%s  %s" % (input_caption(name), caption)
+            painter.setPen(QPen(
+                QColor("#bbf7d0") if is_pressed
+                else QColor("#7dd3fc") if is_selected
+                else QColor("#fca5a5") if is_stop
+                else QColor("#94a3b8") if action
+                else QColor("#4b5563")
+            ))
+            box_w = (PAD_LABEL_X - 14.0) * factor
+            rect = QRectF(
+                anchor_point.x() - (box_w if side == "left" else 0.0),
+                anchor_point.y() - 11.0 * factor * 1.6,
+                box_w,
+                22.0 * factor * 1.6,
+            )
+            painter.drawText(
+                rect,
+                (Qt.AlignRight if side == "left" else Qt.AlignLeft)
+                | Qt.AlignVCenter,
+                text,
+            )
+        painter.end()
 
 
 class Joystick(QWidget):
@@ -1884,14 +2138,41 @@ class VoltControlWindow(QMainWindow):
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Map each control to an action. Press a control on the pad and "
-            "its row highlights, so you can identify a button without "
-            "knowing its number. Changes apply immediately; SAVE keeps them "
-            "for next launch."
+            "Click a control on the pad to bind it. Press it physically and "
+            "it lights up green, so you can identify a button without "
+            "knowing its number. STOP bindings are outlined in red. Changes "
+            "apply immediately; SAVE keeps them for next launch."
         )
         intro.setWordWrap(True)
         intro.setObjectName("gaitDetail")
         layout.addWidget(intro)
+
+        self.gamepad_diagram = GamepadDiagram()
+        self.gamepad_diagram.controlClicked.connect(self.select_gamepad_control)
+        layout.addWidget(self.gamepad_diagram, 1)
+
+        # Editor for whatever is selected on the diagram. The full grid below
+        # still lists every input, including the ones an exotic pad reports
+        # that the drawing has no place for.
+        picker = QHBoxLayout()
+        self.gamepad_selected_label = QLabel("Select a control above")
+        self.gamepad_selected_label.setStyleSheet(
+            "font-weight: bold; color: #e2e8f0;"
+        )
+        self.gamepad_selected_combo = self._NoWheelComboBox()
+        for action, action_caption, group_name in BINDABLE_ACTIONS:
+            self.gamepad_selected_combo.addItem(
+                action_caption if group_name in ("None", "Motion")
+                else "%s - %s" % (group_name, action_caption),
+                action,
+            )
+        self.gamepad_selected_combo.setEnabled(False)
+        self.gamepad_selected_combo.currentIndexChanged.connect(
+            self.selected_gamepad_binding_changed
+        )
+        picker.addWidget(self.gamepad_selected_label)
+        picker.addWidget(self.gamepad_selected_combo, 1)
+        layout.addLayout(picker)
 
         self.gamepad_binding_warning = QLabel("")
         self.gamepad_binding_warning.setWordWrap(True)
@@ -1902,7 +2183,7 @@ class VoltControlWindow(QMainWindow):
         )
         layout.addWidget(self.gamepad_binding_warning)
 
-        group = QGroupBox("Control bindings")
+        group = QGroupBox("All inputs (including any the diagram cannot show)")
         grid = QGridLayout(group)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(4)
@@ -1963,6 +2244,7 @@ class VoltControlWindow(QMainWindow):
         layout.addWidget(self.gamepad_binding_status)
         layout.addStretch(1)
 
+        self.gamepad_selected_input = ""
         self.refresh_gamepad_binding_controls()
         if self.gamepad_binding_load_error:
             self.set_gamepad_binding_status(
@@ -1972,6 +2254,38 @@ class VoltControlWindow(QMainWindow):
             self.set_gamepad_binding_status(
                 "Loaded from %s" % bindings_path(), "#94a3b8"
             )
+
+    def select_gamepad_control(self, name):
+        """Point the single big editor at whatever was clicked on the pad."""
+        self.gamepad_selected_input = name
+        self.gamepad_diagram.set_selected(name)
+        combo = self.gamepad_selected_combo
+        position = combo.findData(resolve(self.gamepad_bindings, name))
+        blocked = combo.blockSignals(True)
+        combo.setCurrentIndex(max(0, position))
+        combo.blockSignals(blocked)
+        combo.setEnabled(True)
+        self.gamepad_selected_label.setText("%s  =" % input_caption(name))
+
+    def selected_gamepad_binding_changed(self, _index):
+        name = getattr(self, "gamepad_selected_input", "")
+        if not name:
+            return
+        action = self.gamepad_selected_combo.currentData() or ""
+        self.gamepad_bindings[name] = action
+        row = self.gamepad_binding_combos.get(name)
+        if row is not None:
+            position = row.findData(action)
+            blocked = row.blockSignals(True)
+            row.setCurrentIndex(max(0, position))
+            row.blockSignals(blocked)
+        self.gamepad_diagram.set_bindings(self.gamepad_bindings)
+        self.refresh_gamepad_binding_warning()
+        self.set_gamepad_binding_status(
+            "%s -> %s (unsaved)"
+            % (input_caption(name), ACTION_CAPTIONS.get(action, "unbound")),
+            "#7dd3fc",
+        )
 
     def set_gamepad_binding_status(self, text, color="#94a3b8"):
         self.gamepad_binding_status.setText(str(text))
@@ -1987,6 +2301,12 @@ class VoltControlWindow(QMainWindow):
             blocked = combo.blockSignals(True)
             combo.setCurrentIndex(max(0, position))
             combo.blockSignals(blocked)
+        diagram = getattr(self, "gamepad_diagram", None)
+        if diagram is not None:
+            diagram.set_bindings(self.gamepad_bindings)
+        selected = getattr(self, "gamepad_selected_input", "")
+        if selected:
+            self.select_gamepad_control(selected)
         self.refresh_gamepad_binding_warning()
 
     def refresh_gamepad_binding_warning(self):
@@ -2024,6 +2344,9 @@ class VoltControlWindow(QMainWindow):
         if combo is None:
             return
         self.gamepad_bindings[name] = combo.currentData() or ""
+        diagram = getattr(self, "gamepad_diagram", None)
+        if diagram is not None:
+            diagram.set_bindings(self.gamepad_bindings)
         self.refresh_gamepad_binding_warning()
         action = self.gamepad_bindings[name]
         self.set_gamepad_binding_status(
@@ -2070,6 +2393,7 @@ class VoltControlWindow(QMainWindow):
         labels = getattr(self, "gamepad_binding_labels", None)
         if not labels:
             return
+        pressed = set()
         for name, label in labels.items():
             # poll_gamepad keys buttons by their integer index and the D-pad
             # directions by name, so the lookup differs per input kind.
@@ -2083,6 +2407,13 @@ class VoltControlWindow(QMainWindow):
             held = bool(self.gamepad_buttons.get(key, False))
             label.setText("●" if held else "")
             label.setStyleSheet("color: #86efac;" if held else "")
+            if held:
+                pressed.add(name)
+        # The diagram is the primary view; the row dots are the
+        # fallback list. Both follow the same physical state.
+        diagram = getattr(self, "gamepad_diagram", None)
+        if diagram is not None:
+            diagram.set_pressed(pressed)
 
     def make_spinbox(self, minimum, maximum, value, step, decimals):
         box = QDoubleSpinBox()

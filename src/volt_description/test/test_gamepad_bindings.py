@@ -339,3 +339,85 @@ class ArmWorkflowDpadTests(unittest.TestCase):
             self.source.index("    def save_gamepad_bindings(self):"):
         ][:900]
         self.assertIn("except OSError as exc:", save)
+
+
+class DiagramTests(unittest.TestCase):
+    """The clickable controller map, checked without starting Qt."""
+
+    def setUp(self):
+        self.source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "volt_control_gui.py"
+        ).read_text()
+
+    def _controls(self):
+        """Parse PAD_CONTROLS without importing Qt."""
+        import ast
+
+        start = self.source.index("PAD_CONTROLS = (")
+        end = self.source.index("\n)", start) + 2
+        return ast.literal_eval(self.source[start:end].split("=", 1)[1].strip())
+
+    def test_every_drawn_control_is_a_real_bindable_input(self):
+        """A control on the diagram that no binding can reach is a lie."""
+        valid = set(all_input_names())
+        for name, *_rest in self._controls():
+            self.assertIn(name, valid, "%s is drawn but not bindable" % name)
+
+    def test_no_control_is_drawn_twice(self):
+        names = [c[0] for c in self._controls()]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_all_four_dpad_directions_are_drawn(self):
+        names = {c[0] for c in self._controls()}
+        for direction in HAT_INPUTS:
+            self.assertIn(direction, names)
+
+    def test_default_stop_bindings_are_reachable_on_the_diagram(self):
+        """The operator must be able to see and click their STOP."""
+        drawn = {c[0] for c in self._controls()}
+        stops = {k for k, v in DEFAULT_BINDINGS.items() if v == "stop"}
+        self.assertTrue(
+            stops & drawn,
+            "no default STOP control appears on the diagram",
+        )
+
+    def test_callout_labels_stay_inside_the_coordinate_space(self):
+        """Text drawn past the edge is text the widget clips.
+
+        The first cut anchored labels 34 units from the edge and then drew a
+        300-unit-wide box outward from there, so the right-hand column ran
+        off the widget.
+        """
+        self.assertIn("PAD_LABEL_X = 290.0", self.source)
+        self.assertIn("box_w = (PAD_LABEL_X - 14.0) * factor", self.source)
+        controls = self._controls()
+        # Every control must sit inside the gutters, not under a label.
+        for name, x, _y, radius, *_rest in controls:
+            self.assertGreater(
+                x - radius, 290.0,
+                "%s overlaps the left label gutter" % name,
+            )
+            self.assertLess(
+                x + radius, 1600.0 - 290.0,
+                "%s overlaps the right label gutter" % name,
+            )
+
+    def test_diagram_drives_selection_and_press_state(self):
+        for hook in (
+            "class GamepadDiagram",
+            "controlClicked = pyqtSignal(str)",
+            "def control_at(self, position)",
+            "def set_pressed(self, names)",
+            "diagram.set_pressed(pressed)",
+            "self.gamepad_diagram.controlClicked.connect(self.select_gamepad_control)",
+        ):
+            self.assertIn(hook, self.source)
+
+    def test_hit_test_and_drawing_share_one_table(self):
+        """Drawn in one place and clickable in another is the classic bug."""
+        control_at = self.source[
+            self.source.index("def control_at(self, position)"):
+        ][:600]
+        self.assertIn("for name, x, y, radius, _glyph, _side, _row in PAD_CONTROLS", control_at)
+        self.assertIn("self._point(x, y)", control_at)
