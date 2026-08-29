@@ -2241,9 +2241,16 @@ bool joinBestNetwork() {
 
     WiFi.disconnect();
     WiFi.begin(WIFI_NETWORKS[choice].ssid, WIFI_NETWORKS[choice].password);
-    // 8 s, not 15. A 2.4 GHz join normally completes in 2-4 s, and a longer
-    // wait here is time not spent trying the network that would have worked.
-    const uint32_t deadline = millis() + 8000UL;
+    // 15 s. This was cut to 8 s to make failover snappier and that was a
+    // mistake: a WPA2 join is auth + assoc + DHCP, and on a busy 2.4 GHz
+    // band at -65 dBm it routinely needs more than eight seconds. The board
+    // then declared a perfectly good network "refused (wrong password?)"
+    // and moved on, which is a far worse failure than a slow join.
+    //
+    // The failover speed came from the other two changes anyway -- trying
+    // every visible candidate instead of only the strongest, and retrying
+    // immediately on the first loss -- not from starving each attempt.
+    const uint32_t deadline = millis() + 15000UL;
     while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
       delay(200);
       Serial.print('.');

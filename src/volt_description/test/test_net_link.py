@@ -487,6 +487,30 @@ class Esp32FirmwareTests(unittest.TestCase):
         # timeouts on the same network.
         self.assertIn("duplicate", chooser)
 
+    def test_join_deadline_allows_a_real_wpa2_association(self):
+        """A join is auth + assoc + DHCP, not a handshake.
+
+        This was cut to 8 s to speed up failover and the real board then
+        reported a perfectly good network as "refused (wrong password?)"
+        after exactly 40 dots -- 8 s of 200 ms waits -- at -65 dBm on a busy
+        2.4 GHz band. Declaring a working network dead is a much worse
+        failure than a slow join.
+        """
+        join = function_body(self.text, "bool joinBestNetwork()")
+        deadline = [
+            line for line in join.splitlines()
+            if "millis() +" in line and "deadline" in line
+        ]
+        self.assertTrue(deadline, "no join deadline found")
+        milliseconds = int(
+            deadline[0].split("millis() +")[1].split("UL")[0].strip()
+        )
+        self.assertGreaterEqual(
+            milliseconds, 12000,
+            "a WPA2 join at a weak signal needs more than %d ms"
+            % milliseconds,
+        )
+
     def test_reconnect_retries_immediately_then_backs_off(self):
         """Waiting the full backoff before even trying cost ~20 s per outage."""
         service = function_body(self.text, "void serviceNetwork()")
